@@ -82,7 +82,7 @@ static void update_meters(int force)
     static const char *const psg_labels[] = {"TONE 1", "TONE 2", "TONE 3", "NOISE"};
     unsigned int i, value, packed;
     int bars;
-    if (pcm || opl)
+    if (pcm || opl || pcstream)
         return;
     for (i = 0; i < (psg ? 4 : ssg ? 6 : 3); ++i) {
         value = meters[i];
@@ -113,7 +113,7 @@ static void update_clock(unsigned long position)
         fill = (unsigned int)(position * 31UL / total);
     cursor(8, 4);
     fputs(C_GOLD, stdout);
-    if (pcm || opl)
+    if (pcm || opl || pcstream)
         fputs("--:--.-", stdout);
     else
         timecode(position);
@@ -142,7 +142,7 @@ static void dashboard(void)
     frame(ssg ? 13 : 14, 21, 2, 48);
     label(5, 3, 46, " NOW PLAYING");
     label(5, 52, 26, " PLAY QUEUE");
-    label(ssg ? 14 : 15, 3, 46, pcm ? " SOUND BLASTER / DIGITAL" : opl ? " ADLIB / MELODIC FM" : psg ? " SIGNAL / PSG VOLUME 0-15" : ssg ? " SIGNAL  /  FM KEYS 0-4  /  SSG VOL 0-15" : " SIGNAL / FM KEYED OPERATORS 0-4");
+    label(ssg ? 14 : 15, 3, 46, pcm ? " SOUND BLASTER / DIGITAL" : opl ? " ADLIB / MELODIC FM" : pcstream ? " 26K / YM2203 STREAM" : psg ? " SIGNAL / PSG VOLUME 0-15" : ssg ? " SIGNAL  /  FM KEYS 0-4  /  SSG VOL 0-15" : " SIGNAL / FM KEYED OPERATORS 0-4");
     cursor(7, 4);
     fputs(C_RESET, stdout); field(title[0] ? title : base(files[selected]), 44);
     update_clock(shown);
@@ -156,15 +156,20 @@ static void dashboard(void)
         cursor(7+i, 52);
         fputs(j == selected ? (active ? C_HOT : C_TAG) : C_AQUA, stdout);
         printf(" %c%02d ", j == selected ? (active ? '>' : '*') : ' ', j+1);
-        field(base(files[j]), 21);
+        field(base(files[j]), pcstream ? 19 : 21);
+        if (pcstream)
+            fputs(cue_files[j] ? " +" : "  ", stdout);
         fputs(C_RESET, stdout);
     }
     cursor(20, 53);
     printf("%02d / %02d  files", selected+1, count);
-    if (pcm || opl) {
+    if (pcm || opl || pcstream) {
         cursor(17, 4);
         fputs(C_AQUA, stdout);
-        fputs(pcm ? "PCM WAV / 8-bit mono / 4-20 kHz" : "YM3812 / 9-channel melodic VGM", stdout);
+        fputs(pcm ? "PCM WAV / 8-bit mono / 4-20 kHz" :
+              pcstream ? (cue_files[selected] ? "PC speaker cues: selected (+)" :
+                                               "PC speaker cues: off") :
+              "YM3812 / 9-channel melodic VGM", stdout);
         fputs(C_RESET, stdout);
         cursor(19, 4);
         fputs("Live meters and clock unavailable.", stdout);
