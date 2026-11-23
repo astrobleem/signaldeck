@@ -192,8 +192,8 @@ static void ssg_meter(void)
     for (ch = 0; ch < 3; ++ch) {
         if (ssg_touched & (1 << ch))
             meter_known |= 1 << (ch + 3);
-        meters[ch+3] = (!(mixer_state & (1 << ch)) ||
-                        !(mixer_state & (8 << ch))) ? ssg_volume[ch] : 0;
+        meter_level(ch + 3, (!(mixer_state & (1 << ch)) ||
+                             !(mixer_state & (8 << ch))) ? ssg_volume[ch] : 0);
     }
 }
 
@@ -216,6 +216,7 @@ static int until(unsigned long samples)
     struct timeval now;
     long secs, elapsed, deadline, pause;
     unsigned long pos;
+    int pumped = 0;
     deadline = (long)((samples / 441) * 10000UL +
                       ((samples % 441) * 10000UL + 440UL) / 441);
     while (!stopped) {
@@ -227,18 +228,22 @@ static int until(unsigned long samples)
         elapsed = secs * 1000000L + now.tv_usec - start.tv_usec;
         if (elapsed < 0)
             return -1;
-        if (ui) {
-            pos = elapsed >= deadline ? samples :
-                  ((unsigned long)elapsed / 1000UL * 441UL) / 10UL;
+        if (elapsed >= deadline)
+            return 0;          /* a due write always goes before the display */
+        pause = deadline - elapsed;
+        /* Keys and meters only use slack of at least one ELKS tick, once
+         * per sleep, then the clock is read again before sleeping. */
+        if (ui && !pumped && pause >= 10000L) {
+            pumped = 1;
+            pos = ((unsigned long)elapsed / 1000UL * 441UL) / 10UL;
             if (deck_pump(pos))
                 return -1;
+            continue;
         }
-        if (elapsed >= deadline)
-            return 0;
-        pause = deadline - elapsed;
         if (pause > (ui ? 20000L : 100000L))
             pause = ui ? 20000L : 100000L;
         usleep(pause);
+        pumped = 0;
     }
     return -1;
 }
@@ -282,7 +287,7 @@ static int walk(unsigned int p, unsigned int end, int play)
                 touched = 1;
                 psg_write(v);
                 if (ui && (latched & 1)) {
-                    meters[latched >> 1] = 15 - (v & 15);
+                    meter_level(latched >> 1, 15 - (v & 15));
                     meter_known |= 1 << (latched >> 1);
                 }
             }
@@ -333,8 +338,8 @@ static int walk(unsigned int p, unsigned int end, int play)
                     return -1;
                 if (ui && r == 0x28) {
                     unsigned char keys = v >> 4;
-                    meters[v & 3] = (keys & 1) + ((keys >> 1) & 1) +
-                                    ((keys >> 2) & 1) + (keys >> 3);
+                    meter_level(v & 3, (keys & 1) + ((keys >> 1) & 1) +
+                                       ((keys >> 2) & 1) + (keys >> 3));
                     meter_known |= 1 << (v & 3);
                 }
             }
@@ -643,8 +648,7 @@ static int run_deck(void)
                 dashboard();
                 result = pcm || opl || pcstream ? delegate_track(files[selected]) : play_vgm();
                 active = 0;
-                meter_known = 0;
-                memset(meters, 0, sizeof(meters));
+                meters_clear();
                 if (signal_stop || action == 'q' || (stopped && !action))
                     break;
                 if (action == 'p' || action == 'n') {

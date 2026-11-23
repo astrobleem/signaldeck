@@ -2,7 +2,11 @@
 
 An 80×25 keyboard player for real-mode ELKS. The PC-98 and Tandy
 screens show actual key/volume state sent to the selected chip, not a
-spectrum or an estimate of sound pressure. The two Sound Blaster paths
+spectrum or an estimate of sound pressure. On the direct PC-98 and
+Tandy screens the meters repaint about ten times a second, redraw only
+the cells that changed, and briefly hold a peak marker that also catches
+key-ons and volume blips between repaints. A due chip write always goes
+before the display, which only uses spare time between writes. The two Sound Blaster paths
 are separate: digital PCM through ELKS or melodic OPL2 at port 388h.
 
 ## Start the deck
