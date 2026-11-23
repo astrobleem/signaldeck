@@ -24,7 +24,9 @@
 
 static unsigned char image[MAX_FILE + 1];
 static volatile unsigned char stopped, signal_stop;
-static unsigned char touched, psg, pcm, opl, ssg;
+static unsigned char touched, psg, pcm, opl, ssg, pcstream;
+static unsigned char stream_ready_next;
+static char *cue_files[99];
 static unsigned char ssg_claim, ssg_touched, noise_claim;
 static unsigned char mixer_start, mixer_state, mixer_mask, mixer_ok;
 static unsigned char noise_start, noise_changed;
@@ -190,8 +192,8 @@ static void ssg_meter(void)
     for (ch = 0; ch < 3; ++ch) {
         if (ssg_touched & (1 << ch))
             meter_known |= 1 << (ch + 3);
-        meters[ch+3] = (!(mixer_state & (1 << ch)) ||
-                        !(mixer_state & (8 << ch))) ? ssg_volume[ch] : 0;
+        meter_level(ch + 3, (!(mixer_state & (1 << ch)) ||
+                             !(mixer_state & (8 << ch))) ? ssg_volume[ch] : 0);
     }
 }
 
@@ -214,6 +216,7 @@ static int until(unsigned long samples)
     struct timeval now;
     long secs, elapsed, deadline, pause;
     unsigned long pos;
+    int pumped = 0;
     deadline = (long)((samples / 441) * 10000UL +
                       ((samples % 441) * 10000UL + 440UL) / 441);
     while (!stopped) {
@@ -225,18 +228,22 @@ static int until(unsigned long samples)
         elapsed = secs * 1000000L + now.tv_usec - start.tv_usec;
         if (elapsed < 0)
             return -1;
-        if (ui) {
-            pos = elapsed >= deadline ? samples :
-                  ((unsigned long)elapsed / 1000UL * 441UL) / 10UL;
+        if (elapsed >= deadline)
+            return 0;          /* a due write always goes before the display */
+        pause = deadline - elapsed;
+        /* Keys and meters only use slack of at least one ELKS tick, once
+         * per sleep, then the clock is read again before sleeping. */
+        if (ui && !pumped && pause >= 10000L) {
+            pumped = 1;
+            pos = ((unsigned long)elapsed / 1000UL * 441UL) / 10UL;
             if (deck_pump(pos))
                 return -1;
+            continue;
         }
-        if (elapsed >= deadline)
-            return 0;
-        pause = deadline - elapsed;
         if (pause > (ui ? 20000L : 100000L))
             pause = ui ? 20000L : 100000L;
         usleep(pause);
+        pumped = 0;
     }
     return -1;
 }
@@ -280,7 +287,7 @@ static int walk(unsigned int p, unsigned int end, int play)
                 touched = 1;
                 psg_write(v);
                 if (ui && (latched & 1)) {
-                    meters[latched >> 1] = 15 - (v & 15);
+                    meter_level(latched >> 1, 15 - (v & 15));
                     meter_known |= 1 << (latched >> 1);
                 }
             }
@@ -331,8 +338,8 @@ static int walk(unsigned int p, unsigned int end, int play)
                     return -1;
                 if (ui && r == 0x28) {
                     unsigned char keys = v >> 4;
-                    meters[v & 3] = (keys & 1) + ((keys >> 1) & 1) +
-                                    ((keys >> 2) & 1) + (keys >> 3);
+                    meter_level(v & 3, (keys & 1) + ((keys >> 1) & 1) +
+                                       ((keys >> 2) & 1) + (keys >> 3));
                     meter_known |= 1 << (v & 3);
                 }
             }
@@ -526,21 +533,23 @@ static const char *delegate_track(const char *path)
     pid_t child, got;
     int status, signaled = 0;
 
+    stream_ready_next = 0;
     child = fork();
     if (child == (pid_t)-1)
         return "Cannot start audio helper";
     if (!child) {
-        char *args[4];
+        char *args[5];
         signal(SIGTERM, SIG_DFL);
         if (stopped)
             exit(125);
         close(0);
         close(1);
         close(2);
-        args[0] = pcm ? "/bin/sbpcm" : "/bin/opl2play";
-        args[1] = pcm ? (char *)path : "--adlib-388";
+        args[0] = pcm ? "/bin/sbpcm" : pcstream ? "/bin/26kplay" : "/bin/opl2play";
+        args[1] = pcm ? (char *)path : pcstream ? "--pc98-26k" : "--adlib-388";
         args[2] = pcm ? 0 : (char *)path;
-        args[3] = 0;
+        args[3] = pcstream ? cue_files[selected] : 0;
+        args[4] = 0;
         execv(args[0], args);
         exit(127);
     }
@@ -563,8 +572,19 @@ static const char *delegate_track(const char *path)
     status = WEXITSTATUS(status);
     if (status == 127)
         return "Missing helper in /bin";
-    if (status == 0)
+    if (status == 0) {
+        stream_ready_next = 1;
         return 0;
+    }
+    if (pcstream) {
+        if (status == 2)
+            return "Unsupported VGM or cue";
+        if (status == 3 && signaled) {
+            stream_ready_next = 1;
+            return "Stopped; channels muted";
+        }
+        return "26K helper playback failed";
+    }
     if (pcm) {
         if (status == 1)
             return "Stopped; PCM reset";
@@ -594,7 +614,7 @@ static int run_deck(void)
             break;
         if (reload) {
             shown = 0;
-            loaded = (pcm || opl) ? 0 : load_vgm(files[selected]);
+            loaded = (pcm || opl || pcstream) ? 0 : load_vgm(files[selected]);
             note = loaded ? loaded : "Ready";
             reload = 0;
             dashboard();
@@ -624,16 +644,22 @@ static int run_deck(void)
                 shown = 0;
                 last_tick = 0;
                 next_key_poll = 0;
-                note = pcm ? "Streaming to /dev/dsp" : opl ? "Direct to OPL2 at 388h" : "Direct to sound chip";
+                note = pcm ? "Streaming to /dev/dsp" : opl ? "Direct to OPL2 at 388h" : pcstream ? "Streaming to YM2203" : "Direct to sound chip";
                 dashboard();
-                result = pcm || opl ? delegate_track(files[selected]) : play_vgm();
+                result = pcm || opl || pcstream ? delegate_track(files[selected]) : play_vgm();
                 active = 0;
-                meter_known = 0;
-                memset(meters, 0, sizeof(meters));
+                meters_clear();
                 if (signal_stop || action == 'q' || (stopped && !action))
                     break;
                 if (action == 'p' || action == 'n') {
-                    autoplay = 1;
+                    if (!pcstream || stream_ready_next) {
+                        autoplay = 1;
+                        continue;
+                    }
+                    action = 0;
+                    stopped = 0;
+                    note = result ? result : "Next canceled (helper status)";
+                    dashboard();
                     continue;
                 }
                 if (action == 's') {
@@ -657,13 +683,13 @@ static int run_deck(void)
 int main(int argc, char **argv)
 {
     const char *err;
-    int arg = 1;
+    int arg = 1, i;
 
     if (argc > 1 && !strcmp(argv[1], "--deck")) {
         ui = 1;
         ++arg;
     }
-    if (argc - arg < 2 || (!ui && argc - arg != 2) || argc - arg > 100)
+    if (argc - arg < 2 || (!ui && argc - arg != 2))
         goto usage;
     if (!strcmp(argv[arg], "--tandy-ex")) {
         psg = 1;
@@ -673,6 +699,9 @@ int main(int argc, char **argv)
     else if (!strcmp(argv[arg], "--pc98-26ks")) {
         ssg = 1;
         chip = "PC-98 / 26K FM+SSG";
+    } else if (ui && !strcmp(argv[arg], "--pc98-stream")) {
+        pcstream = 1;
+        chip = "PC-98 / 26K STREAM";
     } else if (ui && !strcmp(argv[arg], "--sb-pcm")) {
         pcm = 1;
         chip = "SOUND BLASTER / PCM";
@@ -688,7 +717,25 @@ int main(int argc, char **argv)
         return 1;
     if (ui) {
         files = argv + arg + 1;
-        count = argc - arg - 1;
+        if (pcstream) {
+            /* The explicit cue belongs only to its immediately preceding track. */
+            for (i = arg + 1; i < argc; ++i) {
+                if (count == 99 || !*argv[i] || !strncmp(argv[i], "--", 2))
+                    goto usage;
+                files[count] = argv[i];
+                if (i + 1 < argc && !strcmp(argv[i+1], "--percussion")) {
+                    i += 2;
+                    if (i >= argc || !*argv[i] || !strncmp(argv[i], "--", 2))
+                        goto usage;
+                    cue_files[count] = argv[i];
+                }
+                ++count;
+            }
+        } else {
+            count = argc - arg - 1;
+            if (count > 99)
+                goto usage;
+        }
         return run_deck();
     }
     err = load_vgm(argv[arg+1]);
@@ -706,7 +753,8 @@ int main(int argc, char **argv)
 usage:
     fputs("Usage: elksvgm [--deck] --pc98-26k|--pc98-26ks|--tandy-ex FILE.VGM [more with --deck]\n"
           "       elksvgm --deck --sb-pcm FILE.WAV [more]\n"
-          "       elksvgm --deck --adlib-388 FILE.VGM [more]\n",
+          "       elksvgm --deck --adlib-388 FILE.VGM [more]\n"
+          "       elksvgm --deck --pc98-stream FILE.VGM [--percussion FILE.CUE] [more]\n",
           stderr);
     return 2;
 }

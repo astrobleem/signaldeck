@@ -2,7 +2,11 @@
 
 An 80×25 keyboard player for real-mode ELKS. The PC-98 and Tandy
 screens show actual key/volume state sent to the selected chip, not a
-spectrum or an estimate of sound pressure. The two Sound Blaster paths
+spectrum or an estimate of sound pressure. On the direct PC-98 and
+Tandy screens the meters repaint about ten times a second, redraw only
+the cells that changed, and briefly hold a peak marker that also catches
+key-ons and volume blips between repaints. A due chip write always goes
+before the display, which only uses spare time between writes. The two Sound Blaster paths
 are separate: digital PCM through ELKS or melodic OPL2 at port 388h.
 
 ## Screenshots
@@ -21,13 +25,15 @@ Captured in DOSBox-X running ELKS with non-musical chip test signals.
 
 Copy the executables to ELKS (`/bin/elksvgm`, plus `/bin/sbpcm` for PCM and
 `/bin/opl2play` for OPL2). Make them executable and copy the appropriate
-tracks to a directory on the guest. The `elksvgm` executable also runs
+tracks to a directory on the guest. For the 26K streaming mode, also
+install `/bin/26kplay`. The `elksvgm` executable also runs
 from a copied folder as `./elksvgm`; PCM and OPL2 still need their
 respective helpers in `/bin`. Run from an ANSI-enabled 80×25 console:
 
 ```sh
 elksvgm --deck --pc98-26ks track1.vgm track2.vgm
 elksvgm --deck --pc98-26k track.vgm
+elksvgm --deck --pc98-stream track1.vgm --percussion track1.cue track2.vgm
 elksvgm --deck --tandy-ex track.vgm
 elksvgm --deck --sb-pcm track1.wav track2.wav
 elksvgm --deck --adlib-388 track.vgm
@@ -53,10 +59,53 @@ automatically advance at the end.
   3.579545 MHz and a confirmed idle OPL2-compatible interface at 388h;
   no rhythm mode or OPL3 features. This is not a PCM mode.
 
-VGM is limited to 8 KiB and two minutes, without loop replay, VGZ,
-data blocks or multi-chip playback. PCM is limited to four minutes.
-The child-based PCM and OPL2 views do not report live meters or a clock.
+The ordinary VGM modes have an 8 KiB and two-minute limit. None plays
+VGZ, data blocks or multi-chip scores, and only `--pc98-stream` replays
+loops. PCM is limited to four minutes. The delegated PCM, streaming and OPL2 views do not report live
+meters or a clock.
 The deck does not pause, seek, mute individual channels or fade.
+
+### Optional 26K streaming and beeper cues
+
+`--pc98-stream` is a separate real-mode PC-98 mode behind `/bin/26kplay`.
+It accepts bounded raw single-YM2203 VGM with a 128-byte header
+(256 KiB/300 s max), using an idle reset-default 26/K board. It accepts
+3.9936 MHz and 4 MHz scores; playing the latter on a 26/K lowers pitch
+about 0.16%. Stock `--pc98-26ks` is unchanged.
+
+Beyond the direct player's FM and fixed-volume SSG writes, the helper
+accepts exactly these YM2203 writes: `0x27 = 0x40` (FM3 special mode,
+timers left stopped), `0x2D = 0x00` (the reset-default prescaler), the
+FM3 slot frequencies `0xA8–0xAA`/`0xAC–0xAE`, and the SSG hardware
+envelope (`0x0B`/`0x0C` period, `0x0D` shape 0–15, level `0x10` in
+`0x08–0x0A`). Timer values and timer/IRQ bits in `0x27`, `0x2E`/`0x2F`,
+the SSG I/O ports `0x0E`/`0x0F` and every other register are refused
+before any hardware write. A GD3 tag is validated (`Gd3 ` v1.00, exact
+length, eleven terminated strings) and skipped, never displayed. The
+header's AY8910 flag byte `0x7A` may be 0 or 1; a real chip ignores it.
+
+A track with a VGM loop point replays from it until Stop or Next, on
+the same absolute schedule. Tracks paired with a cue play once, since a
+cue covers a single pass, as do tracks whose header loop length does not
+match the score. On exit the helper mutes FM and SSG, then
+returns FM3 mode, SSG-EG and the SSG envelope registers it changed to
+their reset or read-back values, so the next track does not inherit them.
+`26kplay --check FILE.VGM [FILE.CUE]` runs the same preflight with no
+hardware access.
+
+`--percussion FILE.CUE` applies only to the immediately preceding VGM.
+The queue shows `+` beside these tracks. A cue must be authored for that
+exact track; the helper checks the duration, and you choose which cue
+to pair with each file. It adds pitched kick and snare pulses through the PC-98
+built-in speaker, not sample playback. Without an explicit cue, this
+mode does not touch the beeper. The optional overlay expects an idle,
+reset-default speaker and can refuse an incompatible state. The beeper
+is a shared device; do not use another beeper program at the same time.
+Playback cleanup gates the speaker off and restores the standard
+2 kHz PIT pitch, not a previously programmed custom divider. Use
+`pcspeaker=true` in DOSBox-X and set a modest speaker mix, such as
+`mixer spkr 18 /noshow` before boot. Full-volume speaker plus 26K can
+clip in the emulator's mix. A WAV or a sample ROM is not a cue file.
 
 These backends were exercised in DOSBox-X booting real-mode ELKS.
 The combined player has not yet been verified on physical hardware.

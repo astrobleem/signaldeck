@@ -16,9 +16,40 @@ static const char *chip;
 static const char *note;
 static char title[45];
 static unsigned long total, shown;
-static unsigned char last_tick, paint_state[6];
+static unsigned long last_tick;
 static unsigned char meters[6], meter_known;
 static unsigned long next_key_poll;
+
+/* Meters repaint at 10 Hz and only the cells that differ from what is on
+ * screen. meter_hi latches the highest level written since the last
+ * repaint, so a key-on or volume blip between repaints still reaches the
+ * peak marker, which holds for PEAK_HOLD repaints and then falls. */
+#define BAR_CELLS 25
+#define PEAK_HOLD 5                 /* 0.5 s */
+#define PEAK_FALL 5U                /* cells per repaint after the hold */
+#define CLOCK_CELLS 31
+static unsigned char meter_hi[6], peak[6], peak_age[6];
+static unsigned char cell_shown[6][BAR_CELLS];  /* 0 = not on screen */
+static unsigned char value_shown[6];
+static unsigned char clock_fill_shown;
+static unsigned int clock_dec_shown;
+static const char *ink;
+
+static void meter_level(unsigned int i, unsigned char v)
+{
+    meters[i] = v;
+    if (v > meter_hi[i])
+        meter_hi[i] = v;
+}
+
+static void meters_clear(void)
+{
+    meter_known = 0;
+    memset(meters, 0, sizeof(meters));
+    memset(meter_hi, 0, sizeof(meter_hi));
+    memset(peak, 0, sizeof(peak));
+    memset(peak_age, 0, sizeof(peak_age));
+}
 
 static void cursor(int y, int x)
 {
@@ -76,57 +107,131 @@ static void timecode(unsigned long t)
     printf("%02u:%02u.%u", dec / 600, (dec / 10) % 60, dec % 10);
 }
 
+static void paint(const char *colour, int c)
+{
+    if (ink != colour) {
+        fputs(colour, stdout);
+        ink = colour;
+    }
+    putchar(c);
+}
+
+static unsigned int meter_cells(unsigned int i, unsigned int value)
+{
+    return psg || i >= 3 ? (value * BAR_CELLS + 7) / 15 : (value * BAR_CELLS) / 4;
+}
+
+static unsigned int meter_count(void)
+{
+    return psg ? 4 : ssg ? 6 : 3;
+}
+
+/* Called once per 10 Hz repaint, before drawing. */
+static void meter_tick(void)
+{
+    unsigned int i, level, hi;
+    for (i = 0; i < meter_count(); ++i) {
+        level = meter_cells(i, meters[i]);
+        hi = meter_cells(i, meter_hi[i]);
+        meter_hi[i] = meters[i];
+        if (hi >= peak[i]) {
+            peak[i] = hi;
+            peak_age[i] = 0;
+        } else if (peak_age[i] < PEAK_HOLD)
+            ++peak_age[i];
+        else
+            peak[i] = (unsigned char)(peak[i] > level + PEAK_FALL ?
+                                      peak[i] - PEAK_FALL : level);
+    }
+}
+
 static void update_meters(int force)
 {
     static const char *const fm_labels[] = {"FM 1", "FM 2", "FM 3", "SSG A", "SSG B", "SSG C"};
     static const char *const psg_labels[] = {"TONE 1", "TONE 2", "TONE 3", "NOISE"};
-    unsigned int i, value, packed;
-    int bars;
-    if (pcm || opl)
+    unsigned int i, c, value, packed, level, y, next;
+    unsigned char want;
+    if (pcm || opl || pcstream)
         return;
-    for (i = 0; i < (psg ? 4 : ssg ? 6 : 3); ++i) {
+    ink = 0;
+    for (i = 0; i < meter_count(); ++i) {
+        y = (ssg ? 15 : 16) + i;
         value = meters[i];
         packed = value | ((meter_known & (1 << i)) ? 0x80 : 0);
-        if (!force && paint_state[i] == packed)
-            continue;
-        paint_state[i] = packed;
-        bars = psg || i >= 3 ? (value * 25 + 7) / 15 : (value * 25) / 4;
-        cursor((ssg ? 15 : 16)+i, 4);
-        fputs(C_AQUA, stdout);
-        field(psg ? psg_labels[i] : fm_labels[i], 8);
-        fputs(C_RESET, stdout);
-        if (packed & 0x80)
-            printf("%2u   ", value);
-        else
-            fputs(" -   ", stdout);
-        putchar('[');
-        fputs(C_LIME, stdout); chars('#', bars);
-        fputs(C_BLUE, stdout); chars('.', 25-bars);
-        fputs(C_RESET "]", stdout);
+        if (force) {
+            cursor(y, 4);
+            fputs(C_AQUA, stdout);
+            field(psg ? psg_labels[i] : fm_labels[i], 8);
+            cursor(y, 17);
+            fputs(C_RESET "[", stdout);
+            cursor(y, 18 + BAR_CELLS);
+            putchar(']');
+            ink = C_RESET;
+            memset(cell_shown[i], 0, BAR_CELLS);
+            value_shown[i] = 0xff;
+        }
+        if (value_shown[i] != packed) {
+            cursor(y, 12);
+            fputs(C_RESET, stdout);
+            ink = C_RESET;
+            if (packed & 0x80)
+                printf("%2u", value);
+            else
+                fputs(" -", stdout);
+            value_shown[i] = packed;
+        }
+        level = meter_cells(i, value);
+        next = BAR_CELLS + 1;
+        for (c = 0; c < BAR_CELLS; ++c) {
+            want = c < level ? '#' : (peak[i] > level && c + 1 == peak[i]) ? '|' : '.';
+            if (cell_shown[i][c] == want)
+                continue;
+            if (c != next)
+                cursor(y, 18 + c);
+            paint(want == '#' ? C_LIME : want == '|' ? C_GOLD : C_BLUE, want);
+            cell_shown[i][c] = want;
+            next = c + 1;
+        }
     }
+    fputs(C_RESET, stdout);
+    ink = 0;
 }
 
-static void update_clock(unsigned long position)
+static void update_clock(unsigned long position, int force)
 {
-    unsigned int fill = 0;
+    unsigned int c, n, fill = 0, dec = (unsigned int)(position / 4410UL);
     if (total && position <= total)
-        fill = (unsigned int)(position * 31UL / total);
-    cursor(8, 4);
-    fputs(C_GOLD, stdout);
-    if (pcm || opl)
-        fputs("--:--.-", stdout);
-    else
-        timecode(position);
-    fputs(C_RESET " / ", stdout);
-    if (total)
-        timecode(total);
-    else
-        fputs("--:--.-", stdout);
-    cursor(9, 4);
-    fputs(C_BLUE "[", stdout);
-    fputs(C_LIME, stdout); chars('=', fill);
-    fputs(C_BLUE, stdout); chars('.', 31-fill);
-    fputs("]" C_RESET, stdout);
+        fill = (unsigned int)(position * (unsigned long)CLOCK_CELLS / total);
+    if (force || dec != clock_dec_shown) {
+        cursor(8, 4);
+        fputs(C_GOLD, stdout);
+        if (pcm || opl || pcstream)
+            fputs("--:--.-", stdout);
+        else
+            timecode(position);
+        fputs(C_RESET, stdout);
+        clock_dec_shown = dec;
+    }
+    if (force) {
+        fputs(" / ", stdout);
+        if (total)
+            timecode(total);
+        else
+            fputs("--:--.-", stdout);
+        cursor(9, 4);
+        fputs(C_BLUE "[", stdout);
+        fputs(C_LIME, stdout); chars('=', fill);
+        fputs(C_BLUE, stdout); chars('.', CLOCK_CELLS-fill);
+        fputs("]" C_RESET, stdout);
+    } else if (fill != clock_fill_shown) {
+        c = fill < clock_fill_shown ? fill : clock_fill_shown;
+        n = fill < clock_fill_shown ? clock_fill_shown - fill : fill - clock_fill_shown;
+        cursor(9, 5 + c);
+        fputs(fill > clock_fill_shown ? C_LIME : C_BLUE, stdout);
+        chars(fill > clock_fill_shown ? '=' : '.', n);
+        fputs(C_RESET, stdout);
+    }
+    clock_fill_shown = fill;
 }
 
 static void dashboard(void)
@@ -142,10 +247,10 @@ static void dashboard(void)
     frame(ssg ? 13 : 14, 21, 2, 48);
     label(5, 3, 46, " NOW PLAYING");
     label(5, 52, 26, " PLAY QUEUE");
-    label(ssg ? 14 : 15, 3, 46, pcm ? " SOUND BLASTER / DIGITAL" : opl ? " ADLIB / MELODIC FM" : psg ? " SIGNAL / PSG VOLUME 0-15" : ssg ? " SIGNAL  /  FM KEYS 0-4  /  SSG VOL 0-15" : " SIGNAL / FM KEYED OPERATORS 0-4");
+    label(ssg ? 14 : 15, 3, 46, pcm ? " SOUND BLASTER / DIGITAL" : opl ? " ADLIB / MELODIC FM" : pcstream ? " 26K / YM2203 STREAM" : psg ? " SIGNAL / PSG VOLUME 0-15" : ssg ? " SIGNAL  /  FM KEYS 0-4  /  SSG VOL 0-15" : " SIGNAL / FM KEYED OPERATORS 0-4");
     cursor(7, 4);
     fputs(C_RESET, stdout); field(title[0] ? title : base(files[selected]), 44);
-    update_clock(shown);
+    update_clock(shown, 1);
     cursor(11, 4);
     fputs(active ? C_HOT : C_TAG, stdout);
     field(active ? " > PLAYING " : " * STOPPED ", 12);
@@ -156,15 +261,20 @@ static void dashboard(void)
         cursor(7+i, 52);
         fputs(j == selected ? (active ? C_HOT : C_TAG) : C_AQUA, stdout);
         printf(" %c%02d ", j == selected ? (active ? '>' : '*') : ' ', j+1);
-        field(base(files[j]), 21);
+        field(base(files[j]), pcstream ? 19 : 21);
+        if (pcstream)
+            fputs(cue_files[j] ? " +" : "  ", stdout);
         fputs(C_RESET, stdout);
     }
     cursor(20, 53);
     printf("%02d / %02d  files", selected+1, count);
-    if (pcm || opl) {
+    if (pcm || opl || pcstream) {
         cursor(17, 4);
         fputs(C_AQUA, stdout);
-        fputs(pcm ? "PCM WAV / 8-bit mono / 4-20 kHz" : "YM3812 / 9-channel melodic VGM", stdout);
+        fputs(pcm ? "PCM WAV / 8-bit mono / 4-20 kHz" :
+              pcstream ? (cue_files[selected] ? "PC speaker cues: selected (+)" :
+                                               "PC speaker cues: off") :
+              "YM3812 / 9-channel melodic VGM", stdout);
         fputs(C_RESET, stdout);
         cursor(19, 4);
         fputs("Live meters and clock unavailable.", stdout);
@@ -203,9 +313,10 @@ static void input(void)
     }
 }
 
+/* Called from the player only while it has at least one tick of slack. */
 int deck_pump(unsigned long position_samples)
 {
-    unsigned char tick = (unsigned char)(position_samples / 11025UL);
+    unsigned long tick = position_samples / 4410UL;     /* 10 Hz */
     if (position_samples >= next_key_poll) {
         input();
         next_key_poll = position_samples + 882UL;
@@ -213,7 +324,8 @@ int deck_pump(unsigned long position_samples)
     if (!stopped && tick != last_tick) {
         shown = position_samples;
         last_tick = tick;
-        update_clock(shown);
+        meter_tick();
+        update_clock(shown, 0);
         update_meters(0);
         fflush(stdout);
     }

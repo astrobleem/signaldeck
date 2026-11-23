@@ -5,7 +5,7 @@ CPPFLAGS += -I$(ELKS)/include -I$(ELKS)/elks/include -I$(ELKS)/libc/include
 CFLAGS += -Os -Wall -Wextra -Werror -march=i8086 -melks-libc -mregparmcall
 
 .PHONY: all clean
-all: elksvgm sbpcm opl2play
+all: elksvgm sbpcm opl2play 26kplay
 
 elksvgm: elksvgm.c ui.inc
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ elksvgm.c
@@ -16,5 +16,8 @@ sbpcm: sbpcm.c sbpcm-main.c sbpcm.h
 opl2play: opl2play.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ opl2play.c
 
+26kplay: 26kplay.c overlay.inc
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ 26kplay.c
+
 clean:
-	rm -f elksvgm sbpcm opl2play
+	rm -f elksvgm sbpcm opl2play 26kplay
