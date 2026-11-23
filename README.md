@@ -5,6 +5,18 @@ screens show actual key/volume state sent to the selected chip, not a
 spectrum or an estimate of sound pressure. The two Sound Blaster paths
 are separate: digital PCM through ELKS or melodic OPL2 at port 388h.
 
+## Screenshots
+
+Captured in DOSBox-X running ELKS with non-musical chip test signals.
+
+**PC-98 / 26/K FM + SSG**
+
+![Signal Deck playing on an emulated PC-98 with FM and SSG activity bars](screenshots/pc98-fm-ssg.png)
+
+**Tandy 1000 / SN76489 PSG**
+
+![Signal Deck playing on an emulated Tandy with tone and noise volume bars](screenshots/tandy-psg.png)
+
 ## Start the deck
 
 Copy the executables to ELKS (`/bin/elksvgm`, plus `/bin/sbpcm` for PCM and
@@ -56,4 +68,4 @@ playback: `elksvgm --pc98-26k track.vgm` and
 Build with the ELKS ia16-elf toolchain and `elf2elks` on PATH:
 `make ELKS=/path/to/elks`.
 
-This repository contains source only. Music files are not included.
+Prebuilt executables and music files are not included.
