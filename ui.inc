@@ -17,7 +17,7 @@ static const char *note;
 static char title[45];
 static unsigned long total, shown;
 static unsigned long last_tick;
-static unsigned char meters[6], meter_known;
+static unsigned char meters[6], meter_known, meter_env;
 static unsigned long next_key_poll;
 
 /* Meters repaint at 10 Hz and only the cells that differ from what is on
@@ -44,7 +44,7 @@ static void meter_level(unsigned int i, unsigned char v)
 
 static void meters_clear(void)
 {
-    meter_known = 0;
+    meter_known = meter_env = 0;
     memset(meters, 0, sizeof(meters));
     memset(meter_hi, 0, sizeof(meter_hi));
     memset(peak, 0, sizeof(peak));
@@ -116,6 +116,12 @@ static void paint(const char *colour, int c)
     putchar(c);
 }
 
+/* Six rows (FM + SSG) for the 26K FM+SSG and stream modes. */
+static int wide(void)
+{
+    return ssg || pcstream;
+}
+
 static unsigned int meter_cells(unsigned int i, unsigned int value)
 {
     return psg || i >= 3 ? (value * BAR_CELLS + 7) / 15 : (value * BAR_CELLS) / 4;
@@ -123,7 +129,7 @@ static unsigned int meter_cells(unsigned int i, unsigned int value)
 
 static unsigned int meter_count(void)
 {
-    return psg ? 4 : ssg ? 6 : 3;
+    return psg ? 4 : wide() ? 6 : 3;
 }
 
 /* Called once per 10 Hz repaint, before drawing. */
@@ -145,19 +151,31 @@ static void meter_tick(void)
     }
 }
 
+static void update_meter_rows(int force, unsigned int from, unsigned int to);
+
 static void update_meters(int force)
+{
+    update_meter_rows(force, 0, 6);
+}
+
+/* Repaint rows from..to-1 only (the stream view spreads a repaint over
+ * several short slices so the helper is never kept waiting long). */
+static void update_meter_rows(int force, unsigned int from, unsigned int to)
 {
     static const char *const fm_labels[] = {"FM 1", "FM 2", "FM 3", "SSG A", "SSG B", "SSG C"};
     static const char *const psg_labels[] = {"TONE 1", "TONE 2", "TONE 3", "NOISE"};
     unsigned int i, c, value, packed, level, y, next;
     unsigned char want;
-    if (pcm || opl || pcstream)
+    if (pcm || opl)
         return;
     ink = 0;
-    for (i = 0; i < meter_count(); ++i) {
-        y = (ssg ? 15 : 16) + i;
+    if (to > meter_count())
+        to = meter_count();
+    for (i = from; i < to; ++i) {
+        y = (wide() ? 15 : 16) + i;
         value = meters[i];
-        packed = value | ((meter_known & (1 << i)) ? 0x80 : 0);
+        packed = value | ((meter_known & (1 << i)) ? 0x80 : 0) |
+                 ((meter_env & (1 << i)) ? 0x40 : 0);
         if (force) {
             cursor(y, 4);
             fputs(C_AQUA, stdout);
@@ -174,7 +192,9 @@ static void update_meters(int force)
             cursor(y, 12);
             fputs(C_RESET, stdout);
             ink = C_RESET;
-            if (packed & 0x80)
+            if ((packed & 0xc0) == 0xc0)
+                fputs(" E", stdout);       /* SSG hardware envelope */
+            else if (packed & 0x80)
                 printf("%2u", value);
             else
                 fputs(" -", stdout);
@@ -205,7 +225,7 @@ static void update_clock(unsigned long position, int force)
     if (force || dec != clock_dec_shown) {
         cursor(8, 4);
         fputs(C_GOLD, stdout);
-        if (pcm || opl || pcstream)
+        if (pcm || opl || (pcstream && !total))
             fputs("--:--.-", stdout);
         else
             timecode(position);
@@ -244,10 +264,12 @@ static void dashboard(void)
     fputs(C_AQUA, stdout); field(chip, 21); fputs(C_RESET, stdout);
     frame(4, 12, 2, 48);
     frame(4, 21, 51, 28);
-    frame(ssg ? 13 : 14, 21, 2, 48);
+    frame(wide() ? 13 : 14, 21, 2, 48);
     label(5, 3, 46, " NOW PLAYING");
     label(5, 52, 26, " PLAY QUEUE");
-    label(ssg ? 14 : 15, 3, 46, pcm ? " SOUND BLASTER / DIGITAL" : opl ? " ADLIB / MELODIC FM" : pcstream ? " 26K / YM2203 STREAM" : psg ? " SIGNAL / PSG VOLUME 0-15" : ssg ? " SIGNAL  /  FM KEYS 0-4  /  SSG VOL 0-15" : " SIGNAL / FM KEYED OPERATORS 0-4");
+    label(wide() ? 14 : 15, 3, 46, pcm ? " SOUND BLASTER / DIGITAL" : opl ? " ADLIB / MELODIC FM" :
+          pcstream ? (cue_files[selected] ? " STREAM+CUES / FM KEYS 0-4 / SSG VOL 0-15" :
+                                           " STREAM  /  FM KEYS 0-4  /  SSG VOL 0-15") : psg ? " SIGNAL / PSG VOLUME 0-15" : ssg ? " SIGNAL  /  FM KEYS 0-4  /  SSG VOL 0-15" : " SIGNAL / FM KEYED OPERATORS 0-4");
     cursor(7, 4);
     fputs(C_RESET, stdout); field(title[0] ? title : base(files[selected]), 44);
     update_clock(shown, 1);
@@ -268,19 +290,17 @@ static void dashboard(void)
     }
     cursor(20, 53);
     printf("%02d / %02d  files", selected+1, count);
-    if (pcm || opl || pcstream) {
+    if (pcm || opl) {
         cursor(17, 4);
         fputs(C_AQUA, stdout);
         fputs(pcm ? "PCM WAV / 8-bit mono / 4-20 kHz" :
-              pcstream ? (cue_files[selected] ? "PC speaker cues: selected (+)" :
-                                               "PC speaker cues: off") :
               "YM3812 / 9-channel melodic VGM", stdout);
         fputs(C_RESET, stdout);
         cursor(19, 4);
         fputs("Live meters and clock unavailable.", stdout);
     } else {
         update_meters(1);
-        if (!ssg) {
+        if (!wide()) {
             cursor(20, 4);
             fputs(C_AQUA "Activity from chip writes, not audio level." C_RESET, stdout);
         } else {

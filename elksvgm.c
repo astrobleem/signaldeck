@@ -37,6 +37,7 @@ static struct timeval start;
 static unsigned int loop_pos, first, end;
 
 #include "ui.inc"
+#include "status.h"
 
 static void on_signal(int sig)
 {
@@ -528,15 +529,88 @@ static const char *play_vgm(void)
     return result ? "Interrupted; channels muted" : 0;
 }
 
+static unsigned long rd32(const unsigned char *p)
+{
+    return (unsigned long)p[0] | ((unsigned long)p[1] << 8) |
+           ((unsigned long)p[2] << 16) | ((unsigned long)p[3] << 24);
+}
+
+/* Drain helper status records; paint at most once per 10 Hz tick. */
+static void stream_status(int fd)
+{
+    static unsigned char rec[STATUS_SIZE];
+    static unsigned int have;
+    static unsigned char stage;
+    unsigned char b[STATUS_SIZE * 3];
+    unsigned long tick;
+    unsigned int i, ch;
+    int got, fresh = 0, clock_total = 0;
+    if (fd < 0)
+        return;
+    while ((got = read(fd, b, sizeof(b))) > 0) {
+        for (i = 0; i < (unsigned int)got; ++i) {
+            if ((have == 0 && b[i] != 'S') || (have == 1 && b[i] != 'D')) {
+                have = b[i] == 'S';   /* resynchronise on the magic */
+                continue;
+            }
+            rec[have++] = b[i];
+            if (have < STATUS_SIZE)
+                continue;
+            have = 0;
+            if (rd32(rec + 8) != total) {
+                total = rd32(rec + 8);
+                clock_total = 1;
+            }
+            shown = rd32(rec + 4);
+            meter_known = rec[2];
+            meter_env = rec[3];
+            for (ch = 0; ch < STATUS_CHANNELS; ++ch) {
+                meters[ch] = rec[12 + ch];
+                if (rec[18 + ch] > meter_hi[ch])
+                    meter_hi[ch] = rec[18 + ch];   /* peaks from every record */
+            }
+            fresh = 1;
+        }
+    }
+    /* One slice per poll: clock, then FM rows, then SSG rows. */
+    if (fresh) {
+        tick = shown / 4410UL;
+        if (clock_total || tick != last_tick) {
+            last_tick = tick;
+            meter_tick();
+            update_clock(shown, clock_total);
+            fflush(stdout);
+            stage = 1;
+            return;
+        }
+    }
+    if (stage) {
+        update_meter_rows(0, stage == 1 ? 0 : 3, stage == 1 ? 3 : 6);
+        fflush(stdout);
+        stage = stage == 1 ? 2 : 0;
+    }
+}
+
 static const char *delegate_track(const char *path)
 {
     pid_t child, got;
-    int status, signaled = 0;
+    int status, signaled = 0, pipefd[2] = {-1, -1};
 
     stream_ready_next = 0;
+    if (pcstream && !pipe(pipefd) &&
+        fcntl(pipefd[0], F_SETFL, fcntl(pipefd[0], F_GETFL) | O_NONBLOCK) < 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        pipefd[0] = pipefd[1] = -1;
+    }
     child = fork();
-    if (child == (pid_t)-1)
+    if (child == (pid_t)-1) {
+        if (pipefd[0] >= 0) {
+            close(pipefd[0]);
+            close(pipefd[1]);
+        }
         return "Cannot start audio helper";
+    }
     if (!child) {
         char *args[5];
         signal(SIGTERM, SIG_DFL);
@@ -545,6 +619,13 @@ static const char *delegate_track(const char *path)
         close(0);
         close(1);
         close(2);
+        if (pipefd[1] >= 0) {
+            close(pipefd[0]);
+            if (pipefd[1] != STATUS_FD) {
+                dup2(pipefd[1], STATUS_FD);
+                close(pipefd[1]);
+            }
+        }
         args[0] = pcm ? "/bin/sbpcm" : pcstream ? "/bin/26kplay" : "/bin/opl2play";
         args[1] = pcm ? (char *)path : pcstream ? "--pc98-26k" : "--adlib-388";
         args[2] = pcm ? 0 : (char *)path;
@@ -553,10 +634,13 @@ static const char *delegate_track(const char *path)
         execv(args[0], args);
         exit(127);
     }
+    if (pipefd[1] >= 0)
+        close(pipefd[1]);
     for (;;) {
         got = waitpid(child, &status, WNOHANG);
         if (got == child)
             break;
+        stream_status(pipefd[0]);
         if (got == (pid_t)-1 && errno != EINTR)
             return "Audio helper wait failed";
         if (!stopped)
@@ -567,6 +651,8 @@ static const char *delegate_track(const char *path)
         }
         usleep(30000);
     }
+    if (pipefd[0] >= 0)
+        close(pipefd[0]);
     if (!WIFEXITED(status))
         return signaled ? "Stopped" : "Audio helper aborted";
     status = WEXITSTATUS(status);
@@ -643,6 +729,8 @@ static int run_deck(void)
                 active = 1;
                 shown = 0;
                 last_tick = 0;
+                if (pcstream)
+                    total = 0;      /* the helper reports it */
                 next_key_poll = 0;
                 note = pcm ? "Streaming to /dev/dsp" : opl ? "Direct to OPL2 at 388h" : pcstream ? "Streaming to YM2203" : "Direct to sound chip";
                 dashboard();

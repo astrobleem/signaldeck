@@ -61,8 +61,9 @@ automatically advance at the end.
 
 The ordinary VGM modes have an 8 KiB and two-minute limit. None plays
 VGZ, data blocks or multi-chip scores, and only `--pc98-stream` replays
-loops. PCM is limited to four minutes. The delegated PCM, streaming and OPL2 views do not report live
-meters or a clock.
+loops. PCM is limited to four minutes. The `--pc98-stream` view shows
+live meters and a clock reported by its helper; the delegated PCM and
+OPL2 views do not report live meters or a clock.
 The deck does not pause, seek, mute individual channels or fade.
 
 ### Optional 26K streaming and beeper cues
@@ -92,6 +93,12 @@ returns FM3 mode, SSG-EG and the SSG envelope registers it changed to
 their reset or read-back values, so the next track does not inherit them.
 `26kplay --check FILE.VGM [FILE.CUE]` runs the same preflight with no
 hardware access.
+
+Under the deck, the helper reports its position, the pass length and the
+level per channel about ten times a second over a pipe on fd 3, only in
+spare time before its next chip write, and drops a report rather than
+wait. SSG voices in hardware-envelope mode show `E`; such a voice sounds
+even with tone and noise off. Run on its own, the helper reports nothing.
 
 `--percussion FILE.CUE` applies only to the immediately preceding VGM.
 The queue shows `+` beside these tracks. A cue must be authored for that

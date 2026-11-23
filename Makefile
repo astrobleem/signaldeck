@@ -7,7 +7,7 @@ CFLAGS += -Os -Wall -Wextra -Werror -march=i8086 -melks-libc -mregparmcall
 .PHONY: all clean
 all: elksvgm sbpcm opl2play 26kplay
 
-elksvgm: elksvgm.c ui.inc
+elksvgm: elksvgm.c ui.inc status.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ elksvgm.c
 
 sbpcm: sbpcm.c sbpcm-main.c sbpcm.h
@@ -16,7 +16,7 @@ sbpcm: sbpcm.c sbpcm-main.c sbpcm.h
 opl2play: opl2play.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ opl2play.c
 
-26kplay: 26kplay.c overlay.inc
+26kplay: 26kplay.c overlay.inc status.inc status.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ 26kplay.c
 
 clean:

@@ -110,11 +110,49 @@ static int fm_reg(unsigned char r, unsigned char v)
 }
 
 #include "overlay.inc"
+#include "status.inc"
+
+static unsigned char ssg_mix = 0x3f, ssg_vol[3];
+
+/* Report what the chip was told, as the direct player does: FM keyed
+ * operators per channel and SSG level per enabled voice. */
+static void status_write(unsigned char r, unsigned char v)
+{
+    unsigned char ch, vol;
+    if (!st_on)
+        return;
+    if (r == 0x28) {
+        ch = v & 3;
+        v >>= 4;
+        status_level(ch, (v & 1) + ((v >> 1) & 1) + ((v >> 2) & 1) + (v >> 3), 0);
+        return;
+    }
+    if (r == 7)
+        ssg_mix = v;
+    else if (r >= 8 && r <= 10)
+        ssg_vol[r - 8] = v;
+    else if (r >= 6)
+        return;
+    for (ch = 0; ch < 3; ++ch) {
+        if (!(st_known & (8 << ch)) && r != 8 + ch && (r >> 1) != ch)
+            continue;
+        vol = ssg_vol[ch];
+        if (vol & 0x10)       /* an envelope sounds even with tone and noise off */
+            status_level(3 + ch, 15, 1);
+        else if ((ssg_mix & (1 << ch)) && (ssg_mix & (8 << ch)))
+            status_level(3 + ch, 0, 0);     /* fixed level alone is only DC */
+        else
+            status_level(3 + ch, vol & 15, 0);
+    }
+}
+
+static unsigned long pass_total;
 
 static int until(unsigned long samples)
 {
     struct timeval now;
     long secs, elapsed, deadline, next;
+    int reported = 0;
     deadline = (long)((samples / 441) * 10000UL +
                       ((samples % 441) * 10000UL + 440UL) / 441);
     while (!stopped) {
@@ -131,6 +169,13 @@ static int until(unsigned long samples)
             return 0;
         if (next<deadline) next-=elapsed;
         else next=deadline-elapsed;
+        /* Status only uses a full tick of slack, once per wait. */
+        if (!reported && next >= 10000L) {
+            unsigned long at = ((unsigned long)elapsed / 1000UL * 441UL) / 10UL;
+            reported = 1;
+            if (status_due(elapsed, at > time_base ? at - time_base : 0, pass_total))
+                continue;
+        }
         if (next > 100000L)
             usleep(100000);
         else
@@ -204,6 +249,7 @@ static int walk(int fd, unsigned long first, unsigned long end,
                     if (r>=0x90 && r<=0x9e) ssgeg|=1<<ch;
                 }
                 if (put(r,v)) return -1;
+                status_write(r,v);
             }
             continue;
         }
@@ -345,6 +391,8 @@ int main(int argc, char **argv)
     }
     if (clock==4000000UL)
         puts("4.000 MHz score on 3.9936 MHz 26/K: pitch 0.16% lower; timing unchanged.");
+    pass_total=expect;
+    status_init();
     if (gettimeofday(&start,0)) { close(fd); return 1; }
     result=walk(fd,first,data_end,expect,1);
     close(fd);
