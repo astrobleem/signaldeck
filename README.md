@@ -109,6 +109,11 @@ cue covers a single pass, as do tracks whose header loop length does not
 match the score. On exit the helper mutes FM and SSG, then
 returns FM3 mode, SSG-EG and the SSG envelope registers it changed to
 their reset or read-back values, so the next track does not inherit them.
+While the helper validates a score it also copies it to far memory when
+ELKS can spare the space, so playback and loop replays never wait on the
+disk; otherwise it streams from the file as before. The validating pass
+still reads the whole file before the first note, so a large score on a
+floppy takes a few seconds to start.
 `26kplay --check FILE.VGM [FILE.CUE]` runs the same preflight with no
 hardware access.
 

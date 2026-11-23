@@ -52,7 +52,7 @@ static int chip_command(int cmd, int fd, unsigned long end, int play)
     int v;
     if (cmd != 0x50)
         return 0;
-    v = getbyte(fd, end);
+    GETB(v);
     if (v < 0)
         return -1;
     if (loop_first_pending && !play) {
@@ -101,6 +101,7 @@ int main(int argc, char **argv)
     }
     fd = open(argv[2], O_RDONLY);
     if (fd < 0) { perror(argv[2]); return 1; }
+    want_far = !check;    /* playback keeps a far copy when it can */
     if (signal(SIGINT, on_signal) == SIG_ERR || signal(SIGTERM, on_signal) == SIG_ERR ||
         vgm_header(fd, &g, &hdr))
         goto invalid;
@@ -129,6 +130,7 @@ int main(int argc, char **argv)
     if (gettimeofday(&start, 0)) { close(fd); return 1; }
     result = walk(fd, &g, 1);
     close(fd);
+    far_release();
     cleanup();
     if (result) {
         fputs(stopped ? "Playback stopped; muted\n" : "Playback failed; muted\n", stderr);

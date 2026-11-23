@@ -664,7 +664,7 @@ static const char *delegate_track(const char *path)
             kill(child, SIGTERM);
             signaled = 1;
         }
-        usleep(30000);
+        usleep(20000);
     }
     if (pipefd[0] >= 0)
         close(pipefd[0]);

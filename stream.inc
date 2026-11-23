@@ -10,11 +10,14 @@
  *   chip_loop_state  save (0, preflight at the loop point) or restore (1,
  *                 replay seam) any parse state chip_command keeps, so the
  *                 replay is checked exactly as the preflight was.
- * The score is validated in full before any hardware access; playback
- * streams it from the file in 1 KiB reads on an absolute schedule and
- * replays from the loop point when asked. */
+ * The score is validated in full before any hardware access. While it is
+ * validated it is also copied to far memory when ELKS can spare it, so
+ * playback and loop replays never wait for the disk; otherwise playback
+ * streams it from the file in 1 KiB reads. Playback runs on an absolute
+ * schedule and replays from the loop point when asked. */
 #include <errno.h>
 #include <fcntl.h>
+#include <malloc.h>
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
@@ -28,9 +31,13 @@
 #endif
 
 static unsigned char image[1024];
-static unsigned int cur, have;
-static unsigned long pos;
+static unsigned int cur, have;      /* next byte and fill of image[] */
+static unsigned long buf_pos;       /* file offset of image[0] */
+static unsigned int loop_idx = 0xffff; /* loop point's index in image[] */
 static volatile unsigned char stopped;
+static unsigned int far_seg;        /* far copy of the command data */
+static unsigned long far_base;      /* its file offset */
+static unsigned char far_state, want_far; /* 1 filling, 2 complete */
 static struct timeval start;
 static unsigned long loop_pos, loop_samples, time_base, pass_total;
 static unsigned char looping;
@@ -106,40 +113,89 @@ static int until(unsigned long samples)
     return -1;
 }
 
-static int getbyte(int fd, unsigned long end)
+static void far_copy(int to_far, unsigned long off, unsigned int n)
 {
+    unsigned char __far *p = (unsigned char __far *)
+        (((unsigned long)(far_seg + (unsigned int)(off >> 4)) << 16) |
+         (unsigned int)(off & 15));
+    unsigned int i;
+    if (to_far)
+        for (i = 0; i < n; ++i) p[i] = image[i];
+    else
+        for (i = 0; i < n; ++i) image[i] = p[i];
+}
+
+static void far_release(void)
+{
+    if (far_seg)
+        fmemfree((void __far *)((unsigned long)far_seg << 16));
+    far_seg = 0;
+    far_state = 0;
+}
+
+/* Load the next block after image[], from far memory or the file. */
+static int refill(int fd, unsigned long end)
+{
+    unsigned long p = buf_pos + have;
+    unsigned int count;
     int got;
-    if (pos >= end) return -1;
-    if (cur == have) {
-        unsigned int count = end-pos > sizeof(image) ? sizeof(image) : (unsigned int)(end-pos);
+    if (p >= end) return -1;
+    count = end-p > sizeof(image) ? sizeof(image) : (unsigned int)(end-p);
+    if (far_state == 2) {
+        far_copy(0, p - far_base, count);
+        got = (int)count;
+    } else {
         do { got = read(fd, image, count); } while (got < 0 && errno == EINTR && !stopped);
         if (got <= 0) return -1;
-        have = (unsigned int)got;
-        cur = 0;
+        if (far_state == 1)
+            far_copy(1, p - far_base, (unsigned int)got);
     }
-    ++pos;
+    buf_pos = p;
+    have = (unsigned int)got;
+    cur = 0;
+    loop_idx = loop_pos >= p && loop_pos < p + have ? (unsigned int)(loop_pos - p) : 0xffff;
+    return 0;
+}
+
+static int seek_to(int fd, unsigned long p)
+{
+    if (far_state != 2 && lseek(fd, (long)p, SEEK_SET) != (long)p) return -1;
+    buf_pos = p;
+    cur = have = 0;
+    loop_idx = 0xffff;
+    return 0;
+}
+
+static int getbyte(int fd, unsigned long end)
+{
+    if (cur == have && refill(fd, end)) return -1;
     return image[cur++];
 }
+
+/* Inline fast path for the byte-at-a-time parse. */
+#define GETB(v) do { if (cur != have) (v) = image[cur++]; \
+                     else (v) = getbyte(fd, end); } while (0)
 
 static int walk(int fd, const struct vgm *g, int play)
 {
     unsigned long samples=0, cmds=0, writes=0, end=g->data_end, expect=g->expect;
+    unsigned long limit=end-g->first;
     unsigned int wait;
     int cmd, r, v, loopseen=!loop_pos;
-    if (lseek(fd, (long)g->first, SEEK_SET) != (long)g->first) return -1;
-    cur=have=0; pos=g->first;
+    if (seek_to(fd, g->first)) return -1;
     /* Every command is at least one byte, so this bounds a pass. */
-    while (pos<end && !stopped && ++cmds<=end-g->first) {
-        if (pos==loop_pos) {
+    while (!stopped && ++cmds<=limit) {
+        if (cur == have && refill(fd, end)) return -1;
+        if (cur == loop_idx) {
             if (!play) {
                 loop_samples=samples;
                 chip_loop_state(0);
             }
             loopseen=1;
         }
-        cmd=getbyte(fd,end);
+        cmd=image[cur++];
         if (cmd==0x66) {
-            if (pos!=end || samples!=expect || !writes || !loopseen) return -1;
+            if (buf_pos+cur!=end || samples!=expect || !writes || !loopseen) return -1;
             if (!play || !looping) return 0;
             /* Replay from the validated loop point on the same absolute
              * schedule. Whole seconds move into start, so no drift. */
@@ -148,8 +204,8 @@ static int walk(int fd, const struct vgm *g, int play)
                 start.tv_sec+=(long)(time_base/44100UL);
                 time_base%=44100UL;
             }
-            if (lseek(fd,(long)loop_pos,SEEK_SET)!=(long)loop_pos) return -1;
-            cur=have=0; pos=loop_pos; samples=loop_samples; cmds=0;
+            if (seek_to(fd, loop_pos)) return -1;
+            samples=loop_samples; cmds=0;
             chip_loop_state(1);
             continue;
         }
@@ -160,7 +216,7 @@ static int walk(int fd, const struct vgm *g, int play)
             continue;
         }
         if (cmd==0x61) {
-            r=getbyte(fd,end); v=getbyte(fd,end);
+            GETB(r); GETB(v);
             if (r<0 || v<0) return -1;
             wait=r|((unsigned)v<<8);
         } else if (cmd==0x62) wait=735;
@@ -240,8 +296,23 @@ static int vgm_body(int fd, struct vgm *g)
         if (loop_pos<g->first-0x1c || loop_pos>=g->data_end-0x1c) return -1;
         loop_pos+=0x1c;
     }
-    if ((gd3 && gd3_check(fd,g->data_end,g->size)) || walk(fd,g,0))
+    if (gd3 && gd3_check(fd,g->data_end,g->size))
         return -1;
+    /* Best effort: copy the commands to far memory while checking them. */
+    if (want_far) {
+        void __far *m = fmemalloc(g->data_end - g->first);
+        if (m && m != (void __far *)-1L) {
+            far_seg = (unsigned int)((unsigned long)m >> 16);
+            far_base = g->first;
+            far_state = 1;
+        }
+    }
+    if (walk(fd,g,0)) {
+        far_release();
+        return -1;
+    }
+    if (far_state == 1)
+        far_state = 2;
     pass_total=g->expect;
     return 0;
 }

@@ -123,7 +123,7 @@ static int chip_command(int cmd, int fd, unsigned long end, int play)
     int r, v;
     if (cmd != 0x55)
         return 0;
-    r=getbyte(fd,end); v=getbyte(fd,end);
+    GETB(r); GETB(v);
     if (r<0 || v<0 || !fm_reg(r,v)) return -1;
     if (play) {
         if (r<=13) {
@@ -191,6 +191,7 @@ int main(int argc, char **argv)
     }
     fd=open(argv[2],O_RDONLY);
     if (fd<0) { perror(argv[2]); return 1; }
+    want_far = !check;    /* playback keeps a far copy when it can */
     if (signal(SIGINT,on_signal)==SIG_ERR || signal(SIGTERM,on_signal)==SIG_ERR ||
         vgm_header(fd,&g,&hdr) || g.version<0x151 || g.first!=0x80)
         goto invalid;
@@ -226,6 +227,7 @@ int main(int argc, char **argv)
     if (gettimeofday(&start,0)) { close(fd); return 1; }
     result=walk(fd,&g,1);
     close(fd);
+    far_release();
     if ((overlay_stop() | cleanup())) { fputs("Sound cleanup could not complete\n",stderr); return 1; }
     if (result) { fputs(stopped ? "Playback stopped; muted\n" : "Playback failed; muted\n",stderr); return stopped ? 3 : 1; }
     puts("Playback complete; FM and SSG muted");
