@@ -16,10 +16,10 @@ sbpcm: sbpcm.c sbpcm-main.c sbpcm.h
 opl2play: opl2play.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ opl2play.c
 
-26kplay: 26kplay.c stream.inc ptime.inc overlay.inc status.inc status.h
+26kplay: 26kplay.c stream.inc ptime.inc fade.inc overlay.inc status.inc status.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ 26kplay.c
 
-tandyplay: tandyplay.c stream.inc ptime.inc status.inc status.h
+tandyplay: tandyplay.c stream.inc ptime.inc fade.inc status.inc status.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ tandyplay.c
 
 clean:

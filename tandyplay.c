@@ -4,6 +4,8 @@
 #define MAX_FILE (512UL * 1024UL)
 #define MAX_SAMPLES (600UL * 44100UL)
 #include "stream.inc"
+#define FADE_PSG
+#include "fade.inc"
 
 static unsigned char touched;
 static int latched = -1;
@@ -35,6 +37,11 @@ static long chip_next_event(long elapsed)
 static int loop_latch = -1;
 static unsigned char loop_first_pending, loop_data_first;
 
+static void chip_fade(unsigned char level)
+{
+    psgf_apply(level, psg_write);
+}
+
 static void chip_loop_state(int restore)
 {
     if (restore) {
@@ -65,7 +72,7 @@ static int chip_command(int cmd, int fd, unsigned long end, int play)
         return -1;
     if (play) {
         touched = 1;
-        psg_write((unsigned char)v);
+        psg_write(psgf_byte((unsigned char)v));
         if ((v & 0x80) && (latched & 1) && st_on)
             status_level(latched >> 1, 15 - (v & 15), 0);
     }
@@ -85,12 +92,16 @@ int main(int argc, char **argv)
     struct utsname os;
     struct vgm g;
     unsigned int i, hdr;
-    int fd, result, check;
+    int fd, result, check, a, n;
+    const char *path;
     check = argc > 1 && !strcmp(argv[1], "--check");
-    if (argc != 3 || (!check && strcmp(argv[1], "--tandy-ex"))) {
-        fputs("Usage: tandyplay --tandy-ex|--check FILE.VGM (idle Tandy 1000 EX PSG)\n", stderr);
+    n = loops_arg(argc, argv, 2);
+    a = 2 + (n > 0 ? n : 0);
+    if (n < 0 || argc != a + 1 || (!check && strcmp(argv[1], "--tandy-ex"))) {
+        fputs("Usage: tandyplay --tandy-ex|--check [--loops N] FILE.VGM (idle Tandy 1000 EX PSG)\n", stderr);
         return 2;
     }
+    path = argv[a];
     if (!check && (uname(&os) || strcmp(os.machine, "ibmpc i8086") || !real_mode())) {
         fputs("Requires real-mode IBM PC ELKS; no I/O performed\n", stderr);
         return 1;
@@ -99,8 +110,8 @@ int main(int argc, char **argv)
         fputs("Tandy BIOS signature missing; no I/O performed\n", stderr);
         return 1;
     }
-    fd = open(argv[2], O_RDONLY);
-    if (fd < 0) { perror(argv[2]); return 1; }
+    fd = open(path, O_RDONLY);
+    if (fd < 0) { perror(path); return 1; }
     want_far = !check;    /* playback keeps a far copy when it can */
     if (signal(SIGINT, on_signal) == SIG_ERR || signal(SIGTERM, on_signal) == SIG_ERR ||
         vgm_header(fd, &g, &hdr))
@@ -127,6 +138,7 @@ int main(int argc, char **argv)
     if (stopped) { close(fd); return 3; }
     status_init();
     latched = -1;
+    fade_reset();
     if (clock_start(0)) { close(fd); return 1; }
     result = walk(fd, &g, 1);
     close(fd);

@@ -10,6 +10,9 @@
  *   chip_loop_state  save (0, preflight at the loop point) or restore (1,
  *                 replay seam) any parse state chip_command keeps, so the
  *                 replay is checked exactly as the preflight was.
+ *   chip_fade     set the fade level, 0 (none) to FADE_STEPS (silent).
+ * A looping score replays until stopped, or for loops_wanted passes of
+ * the loop body with a fade over the end of the last one.
  * The score is validated in full before any hardware access. While it is
  * validated it is also copied to far memory when ELKS can spare it, so
  * playback and loop replays never wait for the disk; otherwise playback
@@ -20,6 +23,7 @@
 #include <malloc.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
 #include <sys/utsname.h>
@@ -46,7 +50,14 @@ struct vgm {
     unsigned long size, first, data_end, expect, loop_len, version;
 };
 
+#define FADE_SAMPLES (5UL * 44100UL)
+#define FADE_STEPS 16
+static unsigned int loops_wanted, passes;
+static unsigned long fade_from = 0xffffffffUL, fade_len;
+static unsigned char fade_now;
+
 static int chip_command(int cmd, int fd, unsigned long end, int play);
+static void chip_fade(unsigned char level);
 static long chip_next_event(long elapsed);
 static void chip_loop_state(int restore);
 
@@ -134,6 +145,17 @@ static int until(unsigned long samples)
         if (next < deadline) next -= elapsed;
         else next = deadline - elapsed;
         /* Status only uses a full tick of slack, once per wait. */
+        if (fade_from != 0xffffffffUL) {
+            unsigned long at = ((unsigned long)elapsed / 1000UL * 441UL) / 10UL;
+            unsigned char level = 0;
+            if (at >= fade_from)
+                level = at - fade_from >= fade_len ? FADE_STEPS :
+                        (unsigned char)(1 + (at - fade_from) * (FADE_STEPS - 1) / fade_len);
+            if (level != fade_now) {
+                fade_now = level;
+                chip_fade(level);
+            }
+        }
         if (!reported && next >= 10000L) {
             unsigned long at = ((unsigned long)elapsed / 1000UL * 441UL) / 10UL;
             reported = 1;
@@ -216,6 +238,17 @@ static int getbyte(int fd, unsigned long end)
 #define GETB(v) do { if (cur != have) (v) = image[cur++]; \
                      else (v) = getbyte(fd, end); } while (0)
 
+/* Fade over the last FADE_SAMPLES of the pass that starts at time base
+ * tb, but never back into the intro. */
+static void fade_arm(unsigned long tb, unsigned long expect)
+{
+    unsigned long body = expect - loop_samples;
+    fade_len = body < FADE_SAMPLES ? body : FADE_SAMPLES;
+    if (!fade_len)
+        fade_len = 1;
+    fade_from = tb + expect - fade_len;
+}
+
 static int walk(int fd, const struct vgm *g, int play)
 {
     unsigned long samples=0, cmds=0, writes=0, end=g->data_end, expect=g->expect;
@@ -223,6 +256,8 @@ static int walk(int fd, const struct vgm *g, int play)
     unsigned int wait;
     int cmd, r, v, loopseen=!loop_pos;
     if (seek_to(fd, g->first)) return -1;
+    if (play && looping && loops_wanted == 1)
+        fade_arm(0, expect);
     /* Every command is at least one byte, so this bounds a pass. */
     while (!stopped && ++cmds<=limit) {
         if (cur == have && refill(fd, end)) return -1;
@@ -237,13 +272,19 @@ static int walk(int fd, const struct vgm *g, int play)
         if (cmd==0x66) {
             if (buf_pos+cur!=end || samples!=expect || !writes || !loopseen) return -1;
             if (!play || !looping) return 0;
+            if (loops_wanted && ++passes >= loops_wanted) return 0;
             /* Replay from the validated loop point on the same absolute
              * schedule. Whole seconds move into start, so no drift. */
             time_base+=expect-loop_samples;
             if (time_base>=60UL*44100UL) {
-                clock_shift((long)(time_base/44100UL));
+                unsigned long whole=time_base/44100UL;
+                clock_shift((long)whole);
                 time_base%=44100UL;
+                if (fade_from != 0xffffffffUL)
+                    fade_from -= whole*44100UL;
             }
+            if (loops_wanted && passes == loops_wanted - 1)
+                fade_arm(time_base, expect);
             if (seek_to(fd, loop_pos)) return -1;
             samples=loop_samples; cmds=0;
             chip_loop_state(1);
@@ -355,6 +396,20 @@ static int vgm_body(int fd, struct vgm *g)
         far_state = 2;
     pass_total=g->expect;
     return 0;
+}
+
+/* Optional "--loops N" after the mode argument; returns args consumed. */
+static int loops_arg(int argc, char **argv, int at)
+{
+    char *e;
+    long n;
+    if (at + 1 >= argc || strcmp(argv[at], "--loops"))
+        return 0;
+    n = strtol(argv[at + 1], &e, 10);
+    if (*e || n < 0 || n > 99)
+        return -1;
+    loops_wanted = (unsigned int)n;
+    return 2;
 }
 
 /* A loop plays only when the header's loop length agrees with the score. */

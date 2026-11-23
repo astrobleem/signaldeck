@@ -25,6 +25,7 @@
 static unsigned char image[MAX_FILE + 1];
 static volatile unsigned char stopped, signal_stop;
 static unsigned char touched, psg, pcm, opl, ssg, pcstream, tstream;
+static unsigned char advance;      /* 0 once, 1 next track, 2 repeat all */
 #define STREAMING (pcstream || tstream)
 static unsigned char stream_ready_next;
 static char *cue_files[99];
@@ -39,6 +40,42 @@ static unsigned int loop_pos, first, end;
 
 #include "ui.inc"
 #include "ptime.inc"
+#define FADE_PSG
+#define FADE_OPN
+#include "fade.inc"
+
+/* Direct-player loop and fade: in the deck's advance modes a looping
+ * score plays loops_n passes of its loop body and fades over the end of
+ * the last one (5 s, or the loop body if shorter). */
+#define FADE_SAMPLES (5UL * 44100UL)
+static unsigned int loops_n = 2, d_loops, d_passes;
+static unsigned long d_loop_samples, d_time_base;
+static unsigned long d_fade_from = 0xffffffffUL, d_fade_len;
+static unsigned char d_fade_now, d_loop_ok;
+static int d_loop_latch = -1, d_end_latch = -1;
+static unsigned char d_loop_pending, d_loop_data_first;
+
+static int put(unsigned char r, unsigned char v);
+static void psg_write(unsigned char v);
+
+static void d_fade_arm(unsigned long tb)
+{
+    unsigned long body = total - d_loop_samples;
+    d_fade_len = body < FADE_SAMPLES ? body : FADE_SAMPLES;
+    if (!d_fade_len)
+        d_fade_len = 1;
+    d_fade_from = tb + total - d_fade_len;
+}
+
+static void d_fade_to(unsigned char level)
+{
+    if (psg)
+        psgf_apply(level, psg_write);
+    else {
+        fade_level = level;
+        opnf_refresh(-1, put);
+    }
+}
 #include "status.h"
 
 static void on_signal(int sig)
@@ -224,7 +261,7 @@ static long clock_now(void)
     if (gettimeofday(&now, 0))
         return -1;
     secs = now.tv_sec - start.tv_sec;
-    if (secs < 0 || secs > 122)
+    if (secs < 0 || secs > 2000)
         return -1;
     return secs * 1000000L + now.tv_usec - start.tv_usec;
 }
@@ -238,12 +275,24 @@ static int until(unsigned long samples)
     long elapsed, deadline, pause;
     unsigned long pos;
     int pumped = 0;
+    samples += d_time_base;
     deadline = (long)((samples / 441) * 10000UL +
                       ((samples % 441) * 10000UL + 440UL) / 441);
     while (!stopped) {
         elapsed = clock_now();
-        if (elapsed < 0 || elapsed > 122000000L)
+        if (elapsed < 0 || elapsed / 1000000L > 122L * (d_loops ? d_loops : 1) + 10L)
             return -1;
+        if (d_fade_from != 0xffffffffUL) {
+            unsigned long at = ((unsigned long)elapsed / 1000UL * 441UL) / 10UL;
+            unsigned char level = 0;
+            if (at >= d_fade_from)
+                level = at - d_fade_from >= d_fade_len ? FADE_STEPS :
+                        (unsigned char)(1 + (at - d_fade_from) * (FADE_STEPS - 1) / d_fade_len);
+            if (level != d_fade_now) {
+                d_fade_now = level;
+                d_fade_to(level);
+            }
+        }
         if (elapsed >= deadline)
             return 0;          /* a due write always goes before the display */
         pause = deadline - elapsed;
@@ -252,6 +301,7 @@ static int until(unsigned long samples)
         if (ui && !pumped && pause >= 10000L) {
             pumped = 1;
             pos = ((unsigned long)elapsed / 1000UL * 441UL) / 10UL;
+            pos = pos > d_time_base ? pos - d_time_base : 0;   /* within the pass */
             if (deck_pump(pos))
                 return -1;
             continue;
@@ -280,22 +330,46 @@ static int walk(unsigned int p, unsigned int end, int play)
     reject = "Malformed VGM stream";
 
     while (p < end && !stopped) {
-        if (p == loop_pos)
+        if (p == loop_pos) {
             loop_seen = 1;
+            if (!play) {
+                d_loop_samples = samples;
+                d_loop_latch = latched;
+                d_loop_pending = 1;
+            }
+        }
         cmd = image[p++];
         if (cmd == 0x66) {
-            if (!play)
+            if (!play) {
                 total = samples;
+                d_end_latch = latched;
+            }
             if ((ssg_mix || noise_claim) && !ssg_claim) {
                 reject = "SSG mixer/noise needs a voice";
                 return -1;
             }
-            return (p == end && writes && samples && loop_seen) ? 0 : -1;
+            if (p != end || !writes || !samples || !loop_seen)
+                return -1;
+            if (play && d_loops && d_loop_ok && ++d_passes < d_loops) {
+                /* Replay the loop body on the same absolute schedule. */
+                d_time_base += total - d_loop_samples;
+                if (d_passes == d_loops - 1)
+                    d_fade_arm(d_time_base);
+                p = loop_pos;
+                samples = d_loop_samples;
+                latched = d_loop_latch;
+                continue;
+            }
+            return 0;
         }
         if (cmd == 0x50 && psg) {
             if (p >= end)
                 return -1;
             v = image[p++];
+            if (d_loop_pending && !play) {
+                d_loop_pending = 0;
+                d_loop_data_first = !(v & 0x80);
+            }
             if (v & 0x80)
                 latched = (v >> 4) & 7;
             else if ((v & 0x40) || latched < 0 ||
@@ -306,7 +380,7 @@ static int walk(unsigned int p, unsigned int end, int play)
                 if (until(samples))
                     return -1;
                 touched = 1;
-                psg_write(v);
+                psg_write(psgf_byte(v));
                 if (ui && (latched & 1)) {
                     meter_level(latched >> 1, 15 - (v & 15));
                     meter_known |= 1 << (latched >> 1);
@@ -340,8 +414,12 @@ static int walk(unsigned int p, unsigned int end, int play)
                         ssg_touched |= 1 << ch;
                     if (r == 6)
                         noise_changed = 1;
-                    if (r == 7 ? mixer_put(v) : put(r, v))
-                        return -1;
+                    {
+                        int more;
+                        unsigned char out = opnf_write(r, v, &more);
+                        if (r == 7 ? mixer_put(v) : put(r, out))
+                            return -1;
+                    }
                     if (r >= 8)
                         ssg_volume[ch] = v;
                     ssg_meter();
@@ -355,8 +433,14 @@ static int walk(unsigned int p, unsigned int end, int play)
             ++writes;
             if (play) {
                 touched |= 1 << (r == 0x28 ? (v & 3) : (r & 3));
-                if (until(samples) || put(r, v))
+                if (until(samples))
                     return -1;
+                {
+                    int more;
+                    unsigned char out = opnf_write(r, v, &more);
+                    if (put(r, out) || (more && opnf_refresh(r - 0xb0, put)))
+                        return -1;
+                }
                 if (ui && r == 0x28) {
                     unsigned char keys = v >> 4;
                     meter_level(v & 3, (keys & 1) + ((keys >> 1) & 1) +
@@ -436,6 +520,8 @@ static const char *load_vgm(const char *path)
     reject = "Invalid VGM header";
     title[0] = 0;
     loop_pos = 0;
+    d_loop_pending = d_loop_data_first = 0;
+    d_loop_latch = d_end_latch = -1;
     ssg_claim = noise_claim = 0;
     fd = open(path, O_RDONLY | O_NONBLOCK);
     if (fd < 0) {
@@ -523,7 +609,7 @@ static const char *vgm_hardware(void)
     if (psg && !tandy_rom())
         return "Tandy BIOS signature missing";
     if (!psg && ready())
-        return "YM2203 not ready; no writes";
+        return "No 26/K at 188h; no writes";
     return 0;
 }
 
@@ -541,6 +627,16 @@ static const char *play_vgm(void)
         return cleanup() ? "YM2203 cleanup incomplete" :
                            "SSG readback/noise refused";
     ssg_meter();
+    fade_reset();
+    d_time_base = 0;
+    d_passes = 0;
+    d_fade_from = 0xffffffffUL;
+    d_fade_now = 0;
+    /* A loop whose first PSG byte is a data byte replays only when the
+     * chip's end-of-song latch is the one that byte was checked against. */
+    d_loop_ok = loop_pos && (!psg || !d_loop_data_first || d_end_latch == d_loop_latch);
+    if (d_loops == 1 && d_loop_ok)
+        d_fade_arm(0);
     precise = !ptime_init(!psg);
     if (precise)
         ptime_start();
@@ -646,7 +742,8 @@ static const char *delegate_track(const char *path)
         return "Cannot start audio helper";
     }
     if (!child) {
-        char *args[5];
+        char *args[7], loops[4];
+        int n = 2;
         signal(SIGTERM, SIG_DFL);
         if (stopped)
             exit(125);
@@ -664,9 +761,22 @@ static const char *delegate_track(const char *path)
                   tstream ? "/bin/tandyplay" : "/bin/opl2play";
         args[1] = pcm ? (char *)path : pcstream ? "--pc98-26k" :
                   tstream ? "--tandy-ex" : "--adlib-388";
-        args[2] = pcm ? 0 : (char *)path;
-        args[3] = pcstream ? cue_files[selected] : 0;
-        args[4] = 0;
+        if (STREAMING && advance) {
+            /* In the advance modes a looping score ends after loops_n
+             * passes with a fade, so the next track can start. */
+            loops[0] = (char)('0' + loops_n / 10);
+            loops[1] = (char)('0' + loops_n % 10);
+            loops[2] = 0;
+            args[n++] = "--loops";
+            args[n++] = loops_n < 10 ? loops + 1 : loops;
+        }
+        if (pcm)
+            n = 2;
+        else
+            args[n++] = (char *)path;
+        if (pcstream && cue_files[selected])
+            args[n++] = cue_files[selected];
+        args[n] = 0;
         execv(args[0], args);
         exit(127);
     }
@@ -706,6 +816,8 @@ static const char *delegate_track(const char *path)
             stream_ready_next = 1;
             return "Stopped; channels muted";
         }
+        if (status == 4)
+            return "No 26/K at 188h (see README)";
         return pcstream ? "26K helper playback failed" : "PSG helper playback failed";
     }
     if (pcm) {
@@ -773,6 +885,7 @@ static int run_deck(void)
                 next_key_poll = 0;
                 note = pcm ? "Streaming to /dev/dsp" : opl ? "Direct to OPL2 at 388h" : pcstream ? "Streaming to YM2203" : tstream ? "Streaming to PSG" : "Direct to sound chip";
                 dashboard();
+                d_loops = advance ? loops_n : 0;
                 result = pcm || opl || STREAMING ? delegate_track(files[selected]) : play_vgm();
                 active = 0;
                 meters_clear();
@@ -797,6 +910,14 @@ static int run_deck(void)
                     note = result ? result : pcm ? "Playback complete" : "Complete; channels muted";
                     if (!result)
                         shown = total;
+                    /* Advance modes: on to the next track, wrapping in
+                     * repeat-all, stopping after the last otherwise. */
+                    if (!result && advance && (advance == 2 || selected + 1 < count)) {
+                        selected = (selected + 1) % count;
+                        reload = 1;
+                        autoplay = 1;
+                        continue;
+                    }
                 }
                 dashboard();
             }
@@ -815,6 +936,14 @@ int main(int argc, char **argv)
     if (argc > 1 && !strcmp(argv[1], "--deck")) {
         ui = 1;
         ++arg;
+        if (argc > arg + 1 && !strcmp(argv[arg], "--loops")) {
+            char *e;
+            long n = strtol(argv[arg + 1], &e, 10);
+            if (*e || n < 1 || n > 99)
+                goto usage;
+            loops_n = (unsigned int)n;
+            arg += 2;
+        }
     }
     if (argc - arg < 2 || (!ui && argc - arg != 2))
         goto usage;
@@ -881,7 +1010,7 @@ int main(int argc, char **argv)
     puts("Playback complete; channels muted");
     return 0;
 usage:
-    fputs("Usage: elksvgm [--deck] --pc98-26k|--pc98-26ks|--tandy-ex FILE.VGM [more with --deck]\n"
+    fputs("Usage: elksvgm [--deck [--loops N]] --pc98-26k|--pc98-26ks|--tandy-ex FILE.VGM [more with --deck]\n"
           "       elksvgm --deck --sb-pcm FILE.WAV [more]\n"
           "       elksvgm --deck --adlib-388 FILE.VGM [more]\n"
           "       elksvgm --deck --pc98-stream FILE.VGM [--percussion FILE.CUE] [more]\n"

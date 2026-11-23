@@ -44,10 +44,20 @@ Use the hardware mode that matches the installed, idle device. File
 case should match the names on the guest filesystem. Press **Enter**
 to play the selected track from the start, **S** to stop, **P/N** to
 switch tracks, and **Q** to quit. Switching during playback stops the
-current track and starts the newly selected track. Tracks do not
-automatically advance at the end.
+current track and starts the newly selected track.
 
-- **PC-9801-26/K**: raw, single YM2203 stream at 3.9936 MHz. Use
+**A** cycles what happens when a track ends: **Once** (stop; the
+default), **Next** (play the next track, stopping after the last) or
+**All** (repeat the queue). In Next and All a looping score plays its
+loop body `N` times (`--deck --loops N`, default 2) and fades out over
+the last five seconds before the deck moves on; in Once, streamed
+scores loop until Stop and direct scores play once. The fade lowers PSG
+levels, YM2203 carrier levels and SSG fixed levels; an SSG voice on the
+hardware envelope drops out half way through the fade.
+
+- **PC-9801-26/K** at I/O 188h (`No 26/K at 188h` means nothing
+  answered there; in DOSBox-X set `pc-98 fm board io port=0x188`, whose
+  default is 0x88): raw, single YM2203 stream at 3.9936 MHz. Use
   `--pc98-26ks` for FM and fixed-volume SSG tone/noise, or
   `--pc98-26k` for FM only. FM-only tracks work in either queue. The
   SSG mode preserves GPIO direction, does not touch GPIO data ports,

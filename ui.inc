@@ -260,6 +260,16 @@ static void update_clock(unsigned long position, int force)
     clock_fill_shown = fill;
 }
 
+static void footer(void)
+{
+    static const char *const modes[] = {"Once    ", "Next    ", "All     "};
+    cursor(23, 2);
+    fputs(C_TAG " ENTER " C_RESET " Play  " C_TAG " S " C_RESET " Stop  "
+          C_TAG " P/N " C_RESET " Prev/Next  " C_TAG " A " C_RESET " ", stdout);
+    fputs(modes[advance], stdout);
+    fputs(C_TAG " Q " C_RESET " Quit", stdout);
+}
+
 static void dashboard(void)
 {
     int i, j, first = selected > 5 ? selected-5 : 0;
@@ -314,9 +324,7 @@ static void dashboard(void)
             fputs(C_AQUA "Activity from chip writes, not audio level." C_RESET, stdout);
         }
     }
-    cursor(23, 2);
-    fputs(C_TAG " ENTER " C_RESET " Play   " C_TAG " S " C_RESET " Stop   "
-          C_TAG " P/N " C_RESET " Prev/Next   " C_TAG " Q " C_RESET " Quit", stdout);
+    footer();
     fflush(stdout);
 }
 
@@ -332,6 +340,13 @@ static void input(void)
         }
         if (c == 'p' || c == 'P' || c == 'n' || c == 'N') {
             action = c | 32; stopped = 1; return;
+        }
+        if (c == 'a' || c == 'A') {
+            /* Takes effect from the next track started. */
+            advance = advance == 2 ? 0 : advance + 1;
+            footer();
+            fflush(stdout);
+            continue;
         }
         if (!active && (c == '\r' || c == '\n' || c == ' ')) {
             action = ' '; return;

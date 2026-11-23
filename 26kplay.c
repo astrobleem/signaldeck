@@ -3,6 +3,8 @@
 #define MAX_FILE (256UL * 1024UL)
 #define MAX_SAMPLES (300UL * 44100UL)
 #include "stream.inc"
+#define FADE_OPN
+#include "fade.inc"
 
 #define FM_ADDR 0x188
 #define FM_DATA 0x18a
@@ -84,6 +86,12 @@ static void chip_loop_state(int restore)
     (void)restore;                 /* YM2203 writes carry no parse state */
 }
 
+static void chip_fade(unsigned char level)
+{
+    fade_level = level;
+    opnf_refresh(-1, put);
+}
+
 static unsigned char ssg_mix = 0x3f, ssg_vol[3];
 
 /* Report what the chip was told, as the direct player does: FM keyed
@@ -142,7 +150,12 @@ static int chip_command(int cmd, int fd, unsigned long end, int play)
             touched|=1<<ch;
             if (r>=0x90 && r<=0x9e) ssgeg|=1<<ch;
         }
-        if (put(r,v)) return -1;
+        {
+            int more;
+            unsigned char out = opnf_write((unsigned char)r, (unsigned char)v, &more);
+            if (put(r,out)) return -1;
+            if (more && opnf_refresh(r-0xb0, put)) return -1;
+        }
         status_write(r,v);
     }
     return 1;
@@ -179,18 +192,23 @@ int main(int argc, char **argv)
     struct vgm g;
     unsigned long clock;
     unsigned int i, hdr;
-    int fd, result, check;
+    int fd, result, check, a, n;
+    const char *path, *cue;
     check=argc>1 && !strcmp(argv[1],"--check");
-    if ((argc!=3 && argc!=4) || (!check && strcmp(argv[1],"--pc98-26k"))) {
-        fputs("Usage: 26kplay --pc98-26k|--check FILE.VGM [FILE.CUE] (idle reset-default 26/K)\n",stderr);
+    n=loops_arg(argc,argv,2);
+    a=2+(n>0?n:0);
+    if (n<0 || (argc!=a+1 && argc!=a+2) || (!check && strcmp(argv[1],"--pc98-26k"))) {
+        fputs("Usage: 26kplay --pc98-26k|--check [--loops N] FILE.VGM [FILE.CUE] (idle reset-default 26/K)\n",stderr);
         return 2;
     }
+    path=argv[a];
+    cue=argc==a+2 ? argv[a+1] : 0;
     if (!check && (uname(&os)||strcmp(os.machine,"pc-98 i8086")||!real_mode())) {
         fputs("Requires real-mode PC-98 ELKS; no I/O performed\n",stderr);
         return 1;
     }
-    fd=open(argv[2],O_RDONLY);
-    if (fd<0) { perror(argv[2]); return 1; }
+    fd=open(path,O_RDONLY);
+    if (fd<0) { perror(path); return 1; }
     want_far = !check;    /* playback keeps a far copy when it can */
     if (signal(SIGINT,on_signal)==SIG_ERR || signal(SIGTERM,on_signal)==SIG_ERR ||
         vgm_header(fd,&g,&hdr) || g.version<0x151 || g.first!=0x80)
@@ -204,12 +222,12 @@ int main(int argc, char **argv)
         if (!((i>=0x14&&i<0x24)||(i>=0x34&&i<0x38)||(i>=0x44&&i<0x48)||
               (i==0x7a&&image[i]==1)) && image[i])
             goto invalid;
-    if (vgm_body(fd,&g) || (argc==4 && overlay_load(argv[3],g.expect)))
+    if (vgm_body(fd,&g) || (cue && overlay_load(cue,g.expect)))
         goto invalid;
     /* Cue files are authored for one pass, so those tracks stay one-shot.
      * A loop length that disagrees with the walked score also plays once,
      * as every loop did before. */
-    looping=argc==3 && loop_ok(&g);
+    looping=!cue && loop_ok(&g);
     if (check) {
         close(fd);
         puts(looping ? "Valid 26/K VGM; loops" : "Valid 26/K VGM");
@@ -217,13 +235,14 @@ int main(int argc, char **argv)
     }
 
     if (stopped) { close(fd); return 3; }
-    if (ready()) { fputs("No ready YM2203; no writes\n",stderr); close(fd); return 1; }
-    if (argc==4 && overlay_start()) {
+    if (ready()) { fputs("No ready YM2203 at 188h; no writes\n",stderr); close(fd); return 4; }
+    if (cue && overlay_start()) {
         fputs("PC-98 beeper not idle; no writes\n",stderr); close(fd); return 1;
     }
     if (clock==4000000UL)
         puts("4.000 MHz score on 3.9936 MHz 26/K: pitch 0.16% lower; timing unchanged.");
     status_init();
+    fade_reset();
     if (clock_start(1)) { close(fd); return 1; }
     result=walk(fd,&g,1);
     close(fd);
