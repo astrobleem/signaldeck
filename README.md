@@ -44,8 +44,8 @@ automatically advance at the end.
   no rhythm mode or OPL3 features. This is not a PCM mode.
 
 The ordinary VGM modes have an 8 KiB and two-minute limit. None plays
-VGZ, data blocks, multi-chip scores, or loops. PCM is limited to four
-minutes. The delegated PCM, streaming and OPL2 views do not report live
+VGZ, data blocks or multi-chip scores, and only `--pc98-stream` replays
+loops. PCM is limited to four minutes. The delegated PCM, streaming and OPL2 views do not report live
 meters or a clock.
 The deck does not pause, seek, mute individual channels or fade.
 
@@ -56,6 +56,26 @@ It accepts bounded raw single-YM2203 VGM with a 128-byte header
 (256 KiB/300 s max), using an idle reset-default 26/K board. It accepts
 3.9936 MHz and 4 MHz scores; playing the latter on a 26/K lowers pitch
 about 0.16%. Stock `--pc98-26ks` is unchanged.
+
+Beyond the direct player's FM and fixed-volume SSG writes, the helper
+accepts exactly these YM2203 writes: `0x27 = 0x40` (FM3 special mode,
+timers left stopped), `0x2D = 0x00` (the reset-default prescaler), the
+FM3 slot frequencies `0xA8–0xAA`/`0xAC–0xAE`, and the SSG hardware
+envelope (`0x0B`/`0x0C` period, `0x0D` shape 0–15, level `0x10` in
+`0x08–0x0A`). Timer values and timer/IRQ bits in `0x27`, `0x2E`/`0x2F`,
+the SSG I/O ports `0x0E`/`0x0F` and every other register are refused
+before any hardware write. A GD3 tag is validated (`Gd3 ` v1.00, exact
+length, eleven terminated strings) and skipped, never displayed. The
+header's AY8910 flag byte `0x7A` may be 0 or 1; a real chip ignores it.
+
+A track with a VGM loop point replays from it until Stop or Next, on
+the same absolute schedule. Tracks paired with a cue play once, since a
+cue covers a single pass, as do tracks whose header loop length does not
+match the score. On exit the helper mutes FM and SSG, then
+returns FM3 mode, SSG-EG and the SSG envelope registers it changed to
+their reset or read-back values, so the next track does not inherit them.
+`26kplay --check FILE.VGM [FILE.CUE]` runs the same preflight with no
+hardware access.
 
 `--percussion FILE.CUE` applies only to the immediately preceding VGM.
 The queue shows `+` beside these tracks. A cue must be authored for that
