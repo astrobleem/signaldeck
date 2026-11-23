@@ -26,7 +26,7 @@ Captured in DOSBox-X running ELKS with non-musical chip test signals.
 Copy the executables to ELKS (`/bin/elksvgm`, plus `/bin/sbpcm` for PCM and
 `/bin/opl2play` for OPL2). Make them executable and copy the appropriate
 tracks to a directory on the guest. For the 26K streaming mode, also
-install `/bin/26kplay`. The `elksvgm` executable also runs
+install `/bin/26kplay`; for the Tandy streaming mode, `/bin/tandyplay`. The `elksvgm` executable also runs
 from a copied folder as `./elksvgm`; PCM and OPL2 still need their
 respective helpers in `/bin`. Run from an ANSI-enabled 80×25 console:
 
@@ -35,6 +35,7 @@ elksvgm --deck --pc98-26ks track1.vgm track2.vgm
 elksvgm --deck --pc98-26k track.vgm
 elksvgm --deck --pc98-stream track1.vgm --percussion track1.cue track2.vgm
 elksvgm --deck --tandy-ex track.vgm
+elksvgm --deck --tandy-stream long1.vgm long2.vgm
 elksvgm --deck --sb-pcm track1.wav track2.wav
 elksvgm --deck --adlib-388 track.vgm
 ```
@@ -61,10 +62,27 @@ automatically advance at the end.
 
 The ordinary VGM modes have an 8 KiB and two-minute limit. None plays
 VGZ, data blocks or multi-chip scores, and only `--pc98-stream` replays
-loops. PCM is limited to four minutes. The `--pc98-stream` view shows
-live meters and a clock reported by its helper; the delegated PCM and
+loops. PCM is limited to four minutes. The `--pc98-stream` and
+`--tandy-stream` views show live meters and a clock reported by their
+helpers; the delegated PCM and
 OPL2 views do not report live meters or a clock.
 The deck does not pause, seek, mute individual channels or fade.
+
+### Tandy streaming
+
+`--tandy-stream` runs `/bin/tandyplay` for scores beyond the direct
+player's 8 KiB and two minutes: raw single-chip SN76489-family VGM at
+3.579545 MHz with the Tandy noise shape (feedback 0x0006, 15-bit shift
+register, no flags), up to 512 KiB and ten minutes, on a Tandy 1000 EX.
+It shares `26kplay`'s streaming core: a full validating walk before any
+port write, a GD3 tag validated and skipped, the loop point replayed until
+Stop or Next, live meters and clock, and all four channels muted on exit.
+Only `0x50` PSG writes are accepted; a data byte must follow a tone
+latch. Game Gear stereo, other chips, other clocks and the Sega or BBC
+noise shapes are refused. If the first PSG byte after the loop point is a
+data byte whose latch differs at the end of the song, the track plays
+once instead of looping. `tandyplay --check FILE.VGM` validates without
+hardware access.
 
 ### Optional 26K streaming and beeper cues
 

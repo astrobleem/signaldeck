@@ -122,14 +122,20 @@ static int wide(void)
     return ssg || pcstream;
 }
 
+/* Four PSG rows (3 tones + noise) for the Tandy direct and stream modes. */
+static int psg_rows(void)
+{
+    return psg || tstream;
+}
+
 static unsigned int meter_cells(unsigned int i, unsigned int value)
 {
-    return psg || i >= 3 ? (value * BAR_CELLS + 7) / 15 : (value * BAR_CELLS) / 4;
+    return psg_rows() || i >= 3 ? (value * BAR_CELLS + 7) / 15 : (value * BAR_CELLS) / 4;
 }
 
 static unsigned int meter_count(void)
 {
-    return psg ? 4 : wide() ? 6 : 3;
+    return psg_rows() ? 4 : wide() ? 6 : 3;
 }
 
 /* Called once per 10 Hz repaint, before drawing. */
@@ -179,7 +185,7 @@ static void update_meter_rows(int force, unsigned int from, unsigned int to)
         if (force) {
             cursor(y, 4);
             fputs(C_AQUA, stdout);
-            field(psg ? psg_labels[i] : fm_labels[i], 8);
+            field(psg_rows() ? psg_labels[i] : fm_labels[i], 8);
             cursor(y, 17);
             fputs(C_RESET "[", stdout);
             cursor(y, 18 + BAR_CELLS);
@@ -225,7 +231,7 @@ static void update_clock(unsigned long position, int force)
     if (force || dec != clock_dec_shown) {
         cursor(8, 4);
         fputs(C_GOLD, stdout);
-        if (pcm || opl || (pcstream && !total))
+        if (pcm || opl || (STREAMING && !total))
             fputs("--:--.-", stdout);
         else
             timecode(position);
@@ -269,7 +275,7 @@ static void dashboard(void)
     label(5, 52, 26, " PLAY QUEUE");
     label(wide() ? 14 : 15, 3, 46, pcm ? " SOUND BLASTER / DIGITAL" : opl ? " ADLIB / MELODIC FM" :
           pcstream ? (cue_files[selected] ? " STREAM+CUES / FM KEYS 0-4 / SSG VOL 0-15" :
-                                           " STREAM  /  FM KEYS 0-4  /  SSG VOL 0-15") : psg ? " SIGNAL / PSG VOLUME 0-15" : ssg ? " SIGNAL  /  FM KEYS 0-4  /  SSG VOL 0-15" : " SIGNAL / FM KEYED OPERATORS 0-4");
+                                           " STREAM  /  FM KEYS 0-4  /  SSG VOL 0-15") : tstream ? " STREAM / PSG VOLUME 0-15" : psg ? " SIGNAL / PSG VOLUME 0-15" : ssg ? " SIGNAL  /  FM KEYS 0-4  /  SSG VOL 0-15" : " SIGNAL / FM KEYED OPERATORS 0-4");
     cursor(7, 4);
     fputs(C_RESET, stdout); field(title[0] ? title : base(files[selected]), 44);
     update_clock(shown, 1);

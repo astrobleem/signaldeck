@@ -24,7 +24,8 @@
 
 static unsigned char image[MAX_FILE + 1];
 static volatile unsigned char stopped, signal_stop;
-static unsigned char touched, psg, pcm, opl, ssg, pcstream;
+static unsigned char touched, psg, pcm, opl, ssg, pcstream, tstream;
+#define STREAMING (pcstream || tstream)
 static unsigned char stream_ready_next;
 static char *cue_files[99];
 static unsigned char ssg_claim, ssg_touched, noise_claim;
@@ -540,13 +541,16 @@ static void stream_status(int fd)
 {
     static unsigned char rec[STATUS_SIZE];
     static unsigned int have;
-    static unsigned char stage;
+    static unsigned char dirty, slice, clock_force;
     unsigned char b[STATUS_SIZE * 3];
     unsigned long tick;
     unsigned int i, ch;
     int got, fresh = 0, clock_total = 0;
-    if (fd < 0)
+    if (fd < 0) {                   /* new helper: forget partial state */
+        have = 0;
+        dirty = clock_force = 0;
         return;
+    }
     while ((got = read(fd, b, sizeof(b))) > 0) {
         for (i = 0; i < (unsigned int)got; ++i) {
             if ((have == 0 && b[i] != 'S') || (have == 1 && b[i] != 'D')) {
@@ -572,22 +576,30 @@ static void stream_status(int fd)
             fresh = 1;
         }
     }
-    /* One slice per poll: clock, then FM rows, then SSG rows. */
+    /* Paint one slice per poll, round robin: clock, rows 0-2, rows 3-5.
+     * A slow poll never starves the later slices. */
     if (fresh) {
         tick = shown / 4410UL;
         if (clock_total || tick != last_tick) {
             last_tick = tick;
             meter_tick();
-            update_clock(shown, clock_total);
-            fflush(stdout);
-            stage = 1;
-            return;
+            dirty = 7;
+            clock_force |= clock_total;
         }
     }
-    if (stage) {
-        update_meter_rows(0, stage == 1 ? 0 : 3, stage == 1 ? 3 : 6);
+    for (i = 0; i < 3 && dirty; ++i) {
+        ch = slice;
+        slice = slice == 2 ? 0 : slice + 1;
+        if (!(dirty & (1 << ch)))
+            continue;
+        dirty &= ~(1 << ch);
+        if (ch == 0) {
+            update_clock(shown, clock_force);
+            clock_force = 0;
+        } else
+            update_meter_rows(0, ch == 1 ? 0 : 3, ch == 1 ? 3 : 6);
         fflush(stdout);
-        stage = stage == 1 ? 2 : 0;
+        break;
     }
 }
 
@@ -597,7 +609,7 @@ static const char *delegate_track(const char *path)
     int status, signaled = 0, pipefd[2] = {-1, -1};
 
     stream_ready_next = 0;
-    if (pcstream && !pipe(pipefd) &&
+    if (STREAMING && !pipe(pipefd) &&
         fcntl(pipefd[0], F_SETFL, fcntl(pipefd[0], F_GETFL) | O_NONBLOCK) < 0) {
         close(pipefd[0]);
         close(pipefd[1]);
@@ -626,8 +638,10 @@ static const char *delegate_track(const char *path)
                 close(pipefd[1]);
             }
         }
-        args[0] = pcm ? "/bin/sbpcm" : pcstream ? "/bin/26kplay" : "/bin/opl2play";
-        args[1] = pcm ? (char *)path : pcstream ? "--pc98-26k" : "--adlib-388";
+        args[0] = pcm ? "/bin/sbpcm" : pcstream ? "/bin/26kplay" :
+                  tstream ? "/bin/tandyplay" : "/bin/opl2play";
+        args[1] = pcm ? (char *)path : pcstream ? "--pc98-26k" :
+                  tstream ? "--tandy-ex" : "--adlib-388";
         args[2] = pcm ? 0 : (char *)path;
         args[3] = pcstream ? cue_files[selected] : 0;
         args[4] = 0;
@@ -636,6 +650,7 @@ static const char *delegate_track(const char *path)
     }
     if (pipefd[1] >= 0)
         close(pipefd[1]);
+    stream_status(-1);
     for (;;) {
         got = waitpid(child, &status, WNOHANG);
         if (got == child)
@@ -662,14 +677,14 @@ static const char *delegate_track(const char *path)
         stream_ready_next = 1;
         return 0;
     }
-    if (pcstream) {
+    if (STREAMING) {
         if (status == 2)
-            return "Unsupported VGM or cue";
+            return pcstream ? "Unsupported VGM or cue" : "Unsupported Tandy PSG VGM";
         if (status == 3 && signaled) {
             stream_ready_next = 1;
             return "Stopped; channels muted";
         }
-        return "26K helper playback failed";
+        return pcstream ? "26K helper playback failed" : "PSG helper playback failed";
     }
     if (pcm) {
         if (status == 1)
@@ -700,7 +715,9 @@ static int run_deck(void)
             break;
         if (reload) {
             shown = 0;
-            loaded = (pcm || opl || pcstream) ? 0 : load_vgm(files[selected]);
+            if (STREAMING)
+                total = 0;          /* the helper reports it during play */
+            loaded = (pcm || opl || STREAMING) ? 0 : load_vgm(files[selected]);
             note = loaded ? loaded : "Ready";
             reload = 0;
             dashboard();
@@ -729,18 +746,18 @@ static int run_deck(void)
                 active = 1;
                 shown = 0;
                 last_tick = 0;
-                if (pcstream)
+                if (STREAMING)
                     total = 0;      /* the helper reports it */
                 next_key_poll = 0;
-                note = pcm ? "Streaming to /dev/dsp" : opl ? "Direct to OPL2 at 388h" : pcstream ? "Streaming to YM2203" : "Direct to sound chip";
+                note = pcm ? "Streaming to /dev/dsp" : opl ? "Direct to OPL2 at 388h" : pcstream ? "Streaming to YM2203" : tstream ? "Streaming to PSG" : "Direct to sound chip";
                 dashboard();
-                result = pcm || opl || pcstream ? delegate_track(files[selected]) : play_vgm();
+                result = pcm || opl || STREAMING ? delegate_track(files[selected]) : play_vgm();
                 active = 0;
                 meters_clear();
                 if (signal_stop || action == 'q' || (stopped && !action))
                     break;
                 if (action == 'p' || action == 'n') {
-                    if (!pcstream || stream_ready_next) {
+                    if (!STREAMING || stream_ready_next) {
                         autoplay = 1;
                         continue;
                     }
@@ -787,6 +804,9 @@ int main(int argc, char **argv)
     else if (!strcmp(argv[arg], "--pc98-26ks")) {
         ssg = 1;
         chip = "PC-98 / 26K FM+SSG";
+    } else if (ui && !strcmp(argv[arg], "--tandy-stream")) {
+        tstream = 1;
+        chip = "TANDY / PSG STREAM";
     } else if (ui && !strcmp(argv[arg], "--pc98-stream")) {
         pcstream = 1;
         chip = "PC-98 / 26K STREAM";
@@ -842,7 +862,8 @@ usage:
     fputs("Usage: elksvgm [--deck] --pc98-26k|--pc98-26ks|--tandy-ex FILE.VGM [more with --deck]\n"
           "       elksvgm --deck --sb-pcm FILE.WAV [more]\n"
           "       elksvgm --deck --adlib-388 FILE.VGM [more]\n"
-          "       elksvgm --deck --pc98-stream FILE.VGM [--percussion FILE.CUE] [more]\n",
+          "       elksvgm --deck --pc98-stream FILE.VGM [--percussion FILE.CUE] [more]\n"
+          "       elksvgm --deck --tandy-stream FILE.VGM [more]\n",
           stderr);
     return 2;
 }
