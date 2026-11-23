@@ -51,6 +51,44 @@ static long chip_next_event(long elapsed);
 static void chip_loop_state(int restore);
 
 #include "status.inc"
+#include "ptime.inc"
+
+/* The playback clock: the sub-tick PIT clock when /dev/kmem allows it,
+ * else gettimeofday at ELKS tick resolution. */
+static unsigned char precise;
+
+static int clock_start(int pc98)
+{
+    precise = !ptime_init(pc98);
+    if (precise) {
+        ptime_start();
+        return 0;
+    }
+    return gettimeofday(&start, 0);
+}
+
+/* Microseconds since clock_start, or -1. */
+static long clock_now(void)
+{
+    struct timeval now;
+    long secs;
+    if (precise)
+        return ptime_us();
+    if (gettimeofday(&now, 0))
+        return -1;
+    secs = now.tv_sec - start.tv_sec;
+    if (secs < 0 || secs > 2000L)
+        return -1;
+    return secs * 1000000L + now.tv_usec - start.tv_usec;
+}
+
+static void clock_shift(long secs)
+{
+    if (precise)
+        pt_off += secs * 1000000L;
+    else
+        start.tv_sec += secs;
+}
 
 static void on_signal(int sig)
 {
@@ -76,22 +114,19 @@ static int real_mode(void)
     return !(f & 1);
 }
 
+/* Absolute schedule. With the PIT clock, sleep to within one tick of the
+ * deadline and spin the rest; otherwise round to the first ELKS tick. */
 static int until(unsigned long samples)
 {
-    struct timeval now;
-    long secs, elapsed, deadline, next;
+    long elapsed, deadline, next;
     int reported = 0;
     deadline = (long)((samples / 441) * 10000UL +
                       ((samples % 441) * 10000UL + 440UL) / 441);
     while (!stopped) {
-        if (gettimeofday(&now, 0))
-            return -1;
-        secs = now.tv_sec - start.tv_sec;
+        elapsed = clock_now();
         /* At most 60 s of rebase residue plus a loop pass and a pass. */
-        if (secs < 0 || secs > (long)(2 * (MAX_SAMPLES / 44100UL)) + 100L)
-            return -1;
-        elapsed = secs * 1000000L + now.tv_usec - start.tv_usec;
-        if (elapsed < 0)
+        if (elapsed < 0 ||
+            elapsed / 1000000L > (long)(2 * (MAX_SAMPLES / 44100UL)) + 100L)
             return -1;
         next = chip_next_event(elapsed);
         if (elapsed >= deadline)
@@ -105,24 +140,29 @@ static int until(unsigned long samples)
             if (status_due(elapsed, at > time_base ? at - time_base : 0, pass_total))
                 continue;
         }
-        if (next > 100000L)
-            usleep(100000);
-        else
-            usleep(next);
+        if (precise) {
+            if (next < 15000L)
+                continue;          /* spin the last stretch on the PIT */
+            next -= 10000L;        /* a sleep can end up to a tick late */
+        }
+        usleep(next > 100000L ? 100000L : next);
     }
     return -1;
 }
 
+/* Copy n bytes between image[] and the far copy with REP MOVSB. */
 static void far_copy(int to_far, unsigned long off, unsigned int n)
 {
-    unsigned char __far *p = (unsigned char __far *)
-        (((unsigned long)(far_seg + (unsigned int)(off >> 4)) << 16) |
-         (unsigned int)(off & 15));
-    unsigned int i;
+    unsigned int seg = far_seg + (unsigned int)(off >> 4);
+    unsigned int o = (unsigned int)off & 15;
+    unsigned char *near = image;
     if (to_far)
-        for (i = 0; i < n; ++i) p[i] = image[i];
+        asm volatile ("push %%es\n\tmov %%ax,%%es\n\tcld\n\trep movsb\n\tpop %%es"
+                      : "+S" (near), "+D" (o), "+c" (n) : "a" (seg) : "memory");
     else
-        for (i = 0; i < n; ++i) image[i] = p[i];
+        asm volatile ("push %%ds\n\tpush %%es\n\tpush %%ds\n\tpop %%es\n\t"
+                      "mov %%ax,%%ds\n\tcld\n\trep movsb\n\tpop %%es\n\tpop %%ds"
+                      : "+S" (o), "+D" (near), "+c" (n) : "a" (seg) : "memory");
 }
 
 static void far_release(void)
@@ -201,7 +241,7 @@ static int walk(int fd, const struct vgm *g, int play)
              * schedule. Whole seconds move into start, so no drift. */
             time_base+=expect-loop_samples;
             if (time_base>=60UL*44100UL) {
-                start.tv_sec+=(long)(time_base/44100UL);
+                clock_shift((long)(time_base/44100UL));
                 time_base%=44100UL;
             }
             if (seek_to(fd, loop_pos)) return -1;

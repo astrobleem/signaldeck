@@ -127,7 +127,7 @@ int main(int argc, char **argv)
     if (stopped) { close(fd); return 3; }
     status_init();
     latched = -1;
-    if (gettimeofday(&start, 0)) { close(fd); return 1; }
+    if (clock_start(0)) { close(fd); return 1; }
     result = walk(fd, &g, 1);
     close(fd);
     far_release();

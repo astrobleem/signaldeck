@@ -38,6 +38,7 @@ static struct timeval start;
 static unsigned int loop_pos, first, end;
 
 #include "ui.inc"
+#include "ptime.inc"
 #include "status.h"
 
 static void on_signal(int sig)
@@ -210,25 +211,38 @@ static int fm_reg(unsigned char r, unsigned char v)
            (r >= 0xb0 && r <= 0xb2);
 }
 
-/* Absolute schedule: round to the first available ELKS tick, not per wait.
+static unsigned char precise;
+
+/* Microseconds since start: the sub-tick PIT clock when /dev/kmem allows
+ * it, else gettimeofday at ELKS tick resolution. */
+static long clock_now(void)
+{
+    struct timeval now;
+    long secs;
+    if (precise)
+        return ptime_us();
+    if (gettimeofday(&now, 0))
+        return -1;
+    secs = now.tv_sec - start.tv_sec;
+    if (secs < 0 || secs > 122)
+        return -1;
+    return secs * 1000000L + now.tv_usec - start.tv_usec;
+}
+
+/* Absolute schedule. With the PIT clock, sleep to within one tick of the
+ * deadline and spin the rest; otherwise round to the first ELKS tick.
  * Chunking also keeps surplus-sleep and signal response bounded.
  */
 static int until(unsigned long samples)
 {
-    struct timeval now;
-    long secs, elapsed, deadline, pause;
+    long elapsed, deadline, pause;
     unsigned long pos;
     int pumped = 0;
     deadline = (long)((samples / 441) * 10000UL +
                       ((samples % 441) * 10000UL + 440UL) / 441);
     while (!stopped) {
-        if (gettimeofday(&now, 0))
-            return -1;
-        secs = now.tv_sec - start.tv_sec;
-        if (secs < 0 || secs > 122)
-            return -1;
-        elapsed = secs * 1000000L + now.tv_usec - start.tv_usec;
-        if (elapsed < 0)
+        elapsed = clock_now();
+        if (elapsed < 0 || elapsed > 122000000L)
             return -1;
         if (elapsed >= deadline)
             return 0;          /* a due write always goes before the display */
@@ -241,6 +255,11 @@ static int until(unsigned long samples)
             if (deck_pump(pos))
                 return -1;
             continue;
+        }
+        if (precise) {
+            if (pause < 15000L)
+                continue;          /* spin the last stretch on the PIT */
+            pause -= 10000L;       /* a sleep can end up to a tick late */
         }
         if (pause > (ui ? 20000L : 100000L))
             pause = ui ? 20000L : 100000L;
@@ -522,7 +541,10 @@ static const char *play_vgm(void)
         return cleanup() ? "YM2203 cleanup incomplete" :
                            "SSG readback/noise refused";
     ssg_meter();
-    if (stopped || gettimeofday(&start, 0))
+    precise = !ptime_init(!psg);
+    if (precise)
+        ptime_start();
+    if (stopped || (!precise && gettimeofday(&start, 0)))
         return cleanup() ? "YM2203 cleanup incomplete" : "Playback start failed";
     result = walk(first, end, 1);
     if (cleanup())

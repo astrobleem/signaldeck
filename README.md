@@ -137,6 +137,13 @@ Playback cleanup gates the speaker off and restores the standard
 `mixer spkr 18 /noshow` before boot. Full-volume speaker plus 26K can
 clip in the emulator's mix. A WAV or a sample ROM is not a cue file.
 
+Timing: the direct player and both streaming helpers schedule chip writes
+on a sub-tick clock built from the kernel's jiffies (read once through
+`/dev/kmem`) and the count of 8254 channel 0, as ELKS's own `get_ptime()`
+does. They sleep to within one ELKS tick of a write and spin the rest,
+so writes land within about a millisecond instead of on the next 10 ms
+tick. Without `/dev/kmem` they fall back to tick timing.
+
 These backends were exercised in DOSBox-X booting real-mode ELKS.
 The combined player has not yet been verified on physical hardware.
 

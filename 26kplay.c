@@ -224,7 +224,7 @@ int main(int argc, char **argv)
     if (clock==4000000UL)
         puts("4.000 MHz score on 3.9936 MHz 26/K: pitch 0.16% lower; timing unchanged.");
     status_init();
-    if (gettimeofday(&start,0)) { close(fd); return 1; }
+    if (clock_start(1)) { close(fd); return 1; }
     result=walk(fd,&g,1);
     close(fd);
     far_release();
