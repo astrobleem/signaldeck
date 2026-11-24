@@ -26,7 +26,7 @@ Captured in DOSBox-X running ELKS with non-musical chip test signals.
 Copy the executables to ELKS (`/bin/elksvgm`, plus `/bin/sbpcm` for PCM and
 `/bin/opl2play` for OPL2). Make them executable and copy the appropriate
 tracks to a directory on the guest. For the 26K streaming mode, also
-install `/bin/26kplay`. The `elksvgm` executable also runs
+install `/bin/26kplay`; for the Tandy streaming mode, `/bin/tandyplay`. The `elksvgm` executable also runs
 from a copied folder as `./elksvgm`; PCM and OPL2 still need their
 respective helpers in `/bin`. Run from an ANSI-enabled 80×25 console:
 
@@ -35,6 +35,7 @@ elksvgm --deck --pc98-26ks track1.vgm track2.vgm
 elksvgm --deck --pc98-26k track.vgm
 elksvgm --deck --pc98-stream track1.vgm --percussion track1.cue track2.vgm
 elksvgm --deck --tandy-ex track.vgm
+elksvgm --deck --tandy-stream long1.vgm long2.vgm
 elksvgm --deck --sb-pcm track1.wav track2.wav
 elksvgm --deck --adlib-388 track.vgm
 ```
@@ -43,10 +44,20 @@ Use the hardware mode that matches the installed, idle device. File
 case should match the names on the guest filesystem. Press **Enter**
 to play the selected track from the start, **S** to stop, **P/N** to
 switch tracks, and **Q** to quit. Switching during playback stops the
-current track and starts the newly selected track. Tracks do not
-automatically advance at the end.
+current track and starts the newly selected track.
 
-- **PC-9801-26/K**: raw, single YM2203 stream at 3.9936 MHz. Use
+**A** cycles what happens when a track ends: **Once** (stop; the
+default), **Next** (play the next track, stopping after the last) or
+**All** (repeat the queue). In Next and All a looping score plays its
+loop body `N` times (`--deck --loops N`, default 2) and fades out over
+the last five seconds before the deck moves on; in Once, streamed
+scores loop until Stop and direct scores play once. The fade lowers PSG
+levels, YM2203 carrier levels and SSG fixed levels; an SSG voice on the
+hardware envelope drops out half way through the fade.
+
+- **PC-9801-26/K** at I/O 188h (`No 26/K at 188h` means nothing
+  answered there; in DOSBox-X set `pc-98 fm board io port=0x188`, whose
+  default is 0x88): raw, single YM2203 stream at 3.9936 MHz. Use
   `--pc98-26ks` for FM and fixed-volume SSG tone/noise, or
   `--pc98-26k` for FM only. FM-only tracks work in either queue. The
   SSG mode preserves GPIO direction, does not touch GPIO data ports,
@@ -61,9 +72,30 @@ automatically advance at the end.
 
 The ordinary VGM modes have an 8 KiB and two-minute limit. None plays
 VGZ, data blocks or multi-chip scores, and only `--pc98-stream` replays
-loops. PCM is limited to four minutes. The delegated PCM, streaming and OPL2 views do not report live
-meters or a clock.
+loops. PCM is limited to four minutes. The `--pc98-stream` and
+`--tandy-stream` views show live meters and a clock reported by their
+helpers; the delegated PCM and
+OPL2 views do not report live meters or a clock.
 The deck does not pause, seek, mute individual channels or fade.
+
+### Tandy streaming
+
+`--tandy-stream` runs `/bin/tandyplay` for scores beyond the direct
+player's 8 KiB and two minutes: raw single-chip SN76489-family VGM at
+3.579545 MHz with the Tandy noise shape (feedback 0x0006, 15-bit shift
+register, no flags), up to 512 KiB and ten minutes, on a Tandy 1000 EX.
+It shares `26kplay`'s streaming core: a full validating walk before any
+port write, a GD3 tag validated and skipped, the loop point replayed until
+Stop or Next, live meters and clock, and all four channels muted on exit.
+Only `0x50` PSG writes are accepted; a data byte must follow a tone
+latch. Game Gear stereo, other chips, other clocks and the Sega or BBC
+noise shapes are refused. If the first PSG byte after the loop point is a
+data byte whose latch differs at the end of the song, the track plays
+once instead of looping. `tandyplay --check FILE.VGM` validates without
+hardware access.
+
+`tests/signal_breaker.vgm` is the 44.8 s YM2203 test score for `--pc98-stream` (loops at 6.4 s).
+`tests/signal_breaker.py` regenerates it and `tests/signal_breaker.s98` byte for byte.
 
 ### Optional 26K streaming and beeper cues
 
@@ -90,8 +122,19 @@ cue covers a single pass, as do tracks whose header loop length does not
 match the score. On exit the helper mutes FM and SSG, then
 returns FM3 mode, SSG-EG and the SSG envelope registers it changed to
 their reset or read-back values, so the next track does not inherit them.
+While the helper validates a score it also copies it to far memory when
+ELKS can spare the space, so playback and loop replays never wait on the
+disk; otherwise it streams from the file as before. The validating pass
+still reads the whole file before the first note, so a large score on a
+floppy takes a few seconds to start.
 `26kplay --check FILE.VGM [FILE.CUE]` runs the same preflight with no
 hardware access.
+
+Under the deck, the helper reports its position, the pass length and the
+level per channel about ten times a second over a pipe on fd 3, only in
+spare time before its next chip write, and drops a report rather than
+wait. SSG voices in hardware-envelope mode show `E`; such a voice sounds
+even with tone and noise off. Run on its own, the helper reports nothing.
 
 `--percussion FILE.CUE` applies only to the immediately preceding VGM.
 The queue shows `+` beside these tracks. A cue must be authored for that
@@ -106,6 +149,13 @@ Playback cleanup gates the speaker off and restores the standard
 `pcspeaker=true` in DOSBox-X and set a modest speaker mix, such as
 `mixer spkr 18 /noshow` before boot. Full-volume speaker plus 26K can
 clip in the emulator's mix. A WAV or a sample ROM is not a cue file.
+
+Timing: the direct player and both streaming helpers schedule chip writes
+on a sub-tick clock built from the kernel's jiffies (read once through
+`/dev/kmem`) and the count of 8254 channel 0, as ELKS's own `get_ptime()`
+does. They sleep to within one ELKS tick of a write and spin the rest,
+so writes land within about a millisecond instead of on the next 10 ms
+tick. Without `/dev/kmem` they fall back to tick timing.
 
 These backends were exercised in DOSBox-X booting real-mode ELKS.
 The combined player has not yet been verified on physical hardware.
