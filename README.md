@@ -95,6 +95,7 @@ once instead of looping. `tandyplay --check FILE.VGM` validates without
 hardware access.
 
 `tests/signal_breaker.vgm` is the 44.8 s YM2203 test score for `--pc98-stream` (loops at 6.4 s).
+`tests/signal_breaker.py` regenerates it and `tests/signal_breaker.s98` byte for byte.
 
 ### Optional 26K streaming and beeper cues
 
