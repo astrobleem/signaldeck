@@ -94,6 +94,8 @@ data byte whose latch differs at the end of the song, the track plays
 once instead of looping. `tandyplay --check FILE.VGM` validates without
 hardware access.
 
+`tests/signal_breaker.vgm` is the 44.8 s YM2203 test score for `--pc98-stream` (loops at 6.4 s).
+
 ### Optional 26K streaming and beeper cues
 
 `--pc98-stream` is a separate real-mode PC-98 mode behind `/bin/26kplay`.
